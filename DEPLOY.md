@@ -77,3 +77,40 @@ Source documentation:
 - https://www.mediawiki.org/wiki/API:Allimages
 - https://www.mediawiki.org/wiki/API:Etiquette
 - https://huggingface.co/docs/hub/storage-limits
+
+
+---
+
+## Do not try to pre-warm the wsrv.nl cache (tested, blocked)
+
+Cold thumbnails cost 624ms median (p90 2.1s) because the proxy fetches and
+resizes on first request; cached ones serve in ~293ms. Slow origins dominate
+that tail (Museums Victoria 2.5s, DigitaltMuseum 2.3s, the Met 2.2s against
+Wikimedia's 660ms).
+
+The obvious fix -- request every thumbnail ourselves after each build so the
+first requester is us and never a user -- does not work. A run at 12
+concurrent got 6,963 of 12,345 through, then wsrv.nl's Cloudflare protection
+started returning 403. After that, scripted requests are refused outright:
+
+    real browser        200, image        <- still fine
+    python/httpx        403, block page   <- any User-Agent, any headers
+
+It is client fingerprinting, not an IP ban: the browser on the same public IP
+kept working while httpx was refused with browser UA, Accept, Referer and
+Sec-Fetch headers all set. So this is not a concurrency setting to tune down.
+Automated warming of this proxy is not available at any rate.
+
+What this leaves:
+
+- in-page prefetch of the next ~30 results still works, because those are
+  genuine browser requests (measured 713ms -> 245ms on scroll)
+- the origin fallback still covers proxy failures
+- the first viewer of any image still pays the cold fetch
+
+At 500k this stops being a nuisance. Every one of those images has a cold
+first view, there is no way to pre-warm them, and 40x the corpus means 40x
+the traffic through shared proxy IPs that upstreams already rate-limit.
+Generating and hosting thumbnails ourselves (Cloudflare R2 or Backblaze B2,
+roughly $2/month at this size) is the only path that removes this class of
+problem rather than working around it.
