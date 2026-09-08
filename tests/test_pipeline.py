@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 import httpx
 import ingest
-from cloud_corpus import metadata, params_for, ranges, search_text
+from cloud_corpus import clean_text, metadata, params_for, ranges, search_text
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('search_app', ROOT / 'server/app.py')
@@ -42,6 +42,14 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         text = search_text({'title': 'Saturn V', 'creator': 'NASA',
                             'description': 'Launch vehicle', 'tags': 'Apollo'})
         self.assertEqual(text, 'Saturn V Launch vehicle Apollo')
+
+    def test_clean_text_strips_openverse_markup(self):
+        """Openverse returns microformat HTML in some titles. Left alone it
+        renders as literal markup and feeds div/class/style tokens into the
+        BM25 index, competing with real subject terms."""
+        self.assertEqual(clean_text("<div class='fn'> Water Drops</div>"), 'Water Drops')
+        self.assertEqual(clean_text('  a   b  '), 'a b')
+        self.assertEqual(clean_text(None), '')
 
     def test_search_text_excludes_creator(self):
         """Photographer names are not search terms. Indexing them makes a
