@@ -143,9 +143,12 @@ body.searching .hero{max-height:0;opacity:0}
   animation:cardIn .58s var(--spring) both;
   animation-delay:calc(min(var(--i,0),11) * 28ms);
   transition:transform .42s var(--spring-soft)}
+/* No resting outline. On a dark thumbnail a permanent inset ring reads as a
+   drawn box around the picture; the image should define its own edge. It
+   appears only when the card is actually being addressed. */
 .card::after{content:'';position:absolute;inset:0;pointer-events:none;
-  border-radius:inherit;box-shadow:inset 0 0 0 1px rgba(255,255,255,.07);
-  transition:box-shadow .22s var(--ease)}
+  border-radius:inherit;box-shadow:inset 0 0 0 1px rgba(255,255,255,0);
+  transition:box-shadow .3s var(--ease)}
 .card:hover{transform:translateY(-4px) scale(1.018)}
 .card:hover::after{box-shadow:inset 0 0 0 1px rgba(255,255,255,.16)}
 .card.sel::after{box-shadow:inset 0 0 0 2px var(--label)}
@@ -184,11 +187,30 @@ body.searching .hero{max-height:0;opacity:0}
   background:rgba(0,0,0,.62);backdrop-filter:saturate(180%) blur(20px);
   font-size:var(--t1);color:var(--label-2);font-variant-numeric:tabular-nums}
 .card.busy .prog,.card.copied .prog{display:flex}
-.card .ring{width:24px;height:24px;border-radius:50%;
-  border:2px solid rgba(255,255,255,.16);border-top-color:var(--label);
-  animation:spin .75s linear infinite}
-.card.copied .ring{animation:none;border:0;width:auto;height:auto;
-  font-size:var(--t5);line-height:1;color:var(--good)}
+.card .mark{position:relative;width:34px;height:34px;display:grid;place-items:center}
+.card .ring{position:absolute;width:26px;height:26px;border-radius:50%;
+  border:2px solid rgba(255,255,255,.18);border-top-color:var(--label);
+  animation:spin .75s linear infinite;transition:opacity .2s var(--ease)}
+.card.copied .ring{opacity:0;animation:none}
+
+/* The tick draws itself: ring sweeps round, stroke follows. A glyph that
+   simply appears carries none of the sense that something completed. */
+.card .tick{position:absolute;width:34px;height:34px;opacity:0;transform:scale(.6)}
+.card .tick circle{stroke:var(--good);stroke-width:2;opacity:.35;
+  stroke-dasharray:95;stroke-dashoffset:95}
+.card .tick path{stroke:var(--good);stroke-width:2.6;
+  stroke-linecap:round;stroke-linejoin:round;
+  stroke-dasharray:22;stroke-dashoffset:22}
+.card.copied .tick{opacity:1;transform:scale(1);
+  transition:opacity .2s var(--ease),transform .5s var(--spring)}
+.card.copied .tick circle{animation:drawRing .55s var(--ease) .04s forwards}
+.card.copied .tick path{animation:drawTick .4s var(--ease) .22s forwards}
+@keyframes drawRing{to{stroke-dashoffset:0}}
+@keyframes drawTick{to{stroke-dashoffset:0}}
+
+/* the card itself acknowledges the click */
+.card.copied{animation:pop .55s var(--spring)}
+@keyframes pop{0%{transform:scale(1)}28%{transform:scale(.965)}100%{transform:scale(1)}}
 
 /* ---------- states ---------- */
 .empty{padding:var(--s9) var(--s5);text-align:center;color:var(--label-2)}
@@ -234,15 +256,18 @@ body.searching .hero{max-height:0;opacity:0}
 body.searching .stage{min-height:0;padding:var(--s4) 0 var(--s2)}
 
 .bar{position:sticky;top:0;z-index:20;background:transparent;padding:0}
-/* A flat panel ends on a hard horizontal edge, which is the black bar. Mask
-   the whole layer -- background AND backdrop blur -- so it dissolves into the
-   grid instead of stopping. */
-body.searching .bar{
-  background:linear-gradient(180deg,rgba(0,0,0,.92),rgba(0,0,0,.72) 58%,rgba(0,0,0,0));
-  backdrop-filter:saturate(160%) blur(20px);
-  -webkit-mask-image:linear-gradient(180deg,#000 62%,rgba(0,0,0,.55) 84%,transparent);
-  mask-image:linear-gradient(180deg,#000 62%,rgba(0,0,0,.55) 84%,transparent);
-  padding-bottom:var(--s5)}
+/* The bar lives inside .wrap, so painting its background directly stops at
+   the content width and leaves hard vertical edges. The panel is drawn by a
+   full-viewport pseudo-element instead, masked on all four sides so it has
+   no edge anywhere. */
+body.searching .bar{padding-bottom:var(--s5)}
+body.searching .bar::before{
+  content:'';position:absolute;z-index:-1;top:0;bottom:0;
+  left:50%;transform:translateX(-50%);width:100vw;
+  background:linear-gradient(180deg,rgba(0,0,0,.94),rgba(0,0,0,.76) 55%,rgba(0,0,0,0));
+  backdrop-filter:saturate(160%) blur(22px);
+  -webkit-mask-image:linear-gradient(180deg,#000 58%,rgba(0,0,0,.5) 82%,transparent);
+  mask-image:linear-gradient(180deg,#000 58%,rgba(0,0,0,.5) 82%,transparent)}
 
 .hero-inner{padding:0 0 var(--s7);transition:padding .6s var(--ease)}
 .count{justify-content:center}
@@ -458,6 +483,7 @@ async function run(){
     rcache.set(key,{at:Date.now(),results});
     if(rcache.size>150) rcache.delete(rcache.keys().next().value);
     setWorking(false);
+    tintFromResults(d.results);
     latEl.innerHTML=`<b>${Math.round(performance.now()-t0)}ms</b> &nbsp;server ${d.ms}ms`;
     render();
   }catch(e){
@@ -478,7 +504,16 @@ function render(){
     return `<div class="card" data-i="${i}" style="--i:${i}" draggable="true">
       <img src="${esc(r.thumb)}" loading="${i<12?'eager':'lazy'}" fetchpriority="${i<4?'high':'auto'}" decoding="async" alt="${esc(r.title)}" referrerpolicy="no-referrer">
       ${(r.width && r.height) ? `<span class="dim">${r.width}&times;${r.height}</span>` : ''}
-      <div class="prog"><div class="ring"></div><span class="ptxt"></span></div>
+      <div class="prog">
+        <span class="mark">
+          <span class="ring"></span>
+          <svg class="tick" viewBox="0 0 34 34" fill="none" aria-hidden="true">
+            <circle cx="17" cy="17" r="15"/>
+            <path d="M10 17.6 L14.8 22.4 L24 12.8"/>
+          </svg>
+        </span>
+        <span class="ptxt"></span>
+      </div>
       <div class="info">
         <div class="t">${esc(r.title)}</div>
         <div class="l ${sa?'sa':''}">${esc(r.license)} &middot; ${r.score}</div>
@@ -587,8 +622,13 @@ async function copyImage(r){
     card.classList.remove('busy','copied');
     if(cls) card.classList.add(cls);
     const t = card.querySelector('.ptxt'); if(t) t.textContent = txt || '';
-    const ring = card.querySelector('.ring');
-    if(ring) ring.textContent = cls === 'copied' ? '\u2713' : '';
+    // The completed state is a drawn SVG now; nothing to write into the ring.
+    // Re-adding the class has to restart the draw, so the animation is
+    // cleared and forced to recompute rather than being skipped as unchanged.
+    if(cls === 'copied'){
+      const tick = card.querySelector('.tick');
+      if(tick && tick.style){ tick.style.animation='none'; void tick.offsetWidth; tick.style.animation=''; }
+    }
   };
 
   // Copy the MASTER, not the grid thumbnail and not the intermediate the
@@ -711,6 +751,11 @@ const strip = s => esc(s).replace(/\s+/g,' ').slice(0,60);
   ];
   let energy = 0, target = 0, t = 0;
   globalThis.__auraEnergy = v => { target = v; };
+  // Palette travels slowly and never all the way, so the room shifts hue
+  // without the page appearing to change theme underneath the user.
+  globalThis.__auraTint = pal => {
+    blobs.forEach((b,i) => { b.to = pal[i % pal.length]; });
+  };
 
   const frame = () => {
     energy += (target - energy) * 0.045;
@@ -723,9 +768,10 @@ const strip = s => esc(s).replace(/\s+/g,' ').slice(0,60);
       const y = (b.y + Math.sin(t * 0.82 + b.p) * drift) * h;
       const r = b.r * Math.max(w,h) * (1 + energy * 0.10);
       const a = (0.15 + energy * 0.20);
+      if(b.to){ for(let k=0;k<3;k++) b.c[k] += (b.to[k]-b.c[k])*0.012; }
       const g = ctx.createRadialGradient(x,y,0,x,y,r);
-      g.addColorStop(0, `rgba(${b.c[0]},${b.c[1]},${b.c[2]},${a})`);
-      g.addColorStop(1, `rgba(${b.c[0]},${b.c[1]},${b.c[2]},0)`);
+      g.addColorStop(0, `rgba(${b.c[0]|0},${b.c[1]|0},${b.c[2]|0},${a})`);
+      g.addColorStop(1, `rgba(${b.c[0]|0},${b.c[1]|0},${b.c[2]|0},0)`);
       ctx.fillStyle = g;
       ctx.fillRect(0,0,w,h);
     }
@@ -734,6 +780,34 @@ const strip = s => esc(s).replace(/\s+/g,' ').slice(0,60);
   frame();
   requestAnimationFrame(() => cv.classList.add('on'));
 })();
+
+/* ---------------------------------------------------------------------------
+   Let the results colour the room. After a search settles, sample a handful
+   of thumbnails and ease the ambient lights toward what is actually on
+   screen -- so searching "water" cools the background and "rust" warms it.
+   The thumbnails are already in the browser cache by this point, so the
+   fetches cost nothing, and every stage fails quietly.
+   --------------------------------------------------------------------------- */
+async function tintFromResults(items){
+  if(!globalThis.__auraTint || !items || !items.length) return;
+  const picks = items.slice(0, 6).map(r => r.thumb).filter(Boolean);
+  const cv = document.createElement('canvas'); cv.width = cv.height = 1;
+  const cx = cv.getContext('2d', {willReadFrequently:true});
+  const out = [];
+  for(const url of picks){
+    try{
+      const bmp = await createImageBitmap(await (await fetch(url)).blob());
+      cx.drawImage(bmp, 0, 0, 1, 1);
+      const [r,g,b] = cx.getImageData(0,0,1,1).data;
+      // Push each sample away from grey so a corpus of muted photographs
+      // still moves the lights; averaging raw pixels lands on brown every time.
+      const mx = Math.max(r,g,b), mn = Math.min(r,g,b), mid = (mx+mn)/2 || 1;
+      const k = 1.55;
+      out.push([r,g,b].map(c => Math.max(24, Math.min(255, mid + (c-mid)*k))));
+    }catch(e){ /* tainted, offline, or gone: skip it */ }
+  }
+  if(out.length) globalThis.__auraTint(out);
+}
 
 </script>
 </body>

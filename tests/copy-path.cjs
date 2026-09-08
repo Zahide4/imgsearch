@@ -18,7 +18,8 @@ const results = [{ full_url: 'https://example/master.jpg', thumb: 'https://wsrv.
 let toasted = null, states = [];
 const stubCard = { classList: { add: s => states.push(s), remove() {} },
                    querySelector: () => ({ currentSrc: 'https://example/rendered.jpg',
-                                           classList: { add() {}, remove() {} }, textContent: '' }) };
+                                           classList: { add() {}, remove() {} }, textContent: '',
+                                           style: {}, offsetWidth: 0 }) };
 const outEl = { querySelector: () => stubCard };
 const originOf = () => 'https://example/origin.jpg';
 const toast = t => { toasted = t; };
