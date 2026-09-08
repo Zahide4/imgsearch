@@ -178,6 +178,51 @@ async def stats():
     return {'total': count}
 
 
+@app.get('/api/progress')
+async def progress(target: int = 500000):
+    """Live corpus growth for the build dashboard.
+
+    Keeps a small in-memory sample ring so rate and ETA are available on the
+    first request rather than after the client has watched for a while. The
+    ring resets when Render cycles the instance; that only costs the rate
+    estimate, never the count, which is always read fresh from Qdrant.
+    """
+    if not S['qc']:
+        return JSONResponse({'error': 'not configured'}, status_code=503)
+    try:
+        count = (await S['qc'].count(COLLECTION, exact=True)).count
+    except Exception:
+        raise HTTPException(503, 'Index unavailable')
+
+    now = time.time()
+    hist = S.setdefault('phist', [])
+    if not hist or now - hist[-1][0] >= 5:
+        hist.append((now, count))
+        del hist[:-720]                       # ~1h at 5s resolution
+
+    rate = None
+    if len(hist) >= 2:
+        # Use the widest window available, capped at 15 minutes, so a single
+        # slow checkpoint does not swing the estimate.
+        first = next((h for h in hist if now - h[0] <= 900), hist[0])
+        dt, dn = now - first[0], count - first[1]
+        if dt > 20 and dn > 0:
+            rate = dn / dt
+
+    remaining = max(0, target - count)
+    return {
+        'count': count,
+        'target': target,
+        'remaining': remaining,
+        'pct': round(min(100.0, count / target * 100), 2) if target else 0,
+        'per_second': round(rate, 3) if rate else None,
+        'per_minute': round(rate * 60, 1) if rate else None,
+        'eta_seconds': int(remaining / rate) if rate and remaining else None,
+        'samples': [{'t': int(t), 'n': n} for t, n in hist[-180:]],
+        'server_time': int(now),
+    }
+
+
 @app.get('/healthz')
 def healthz():
     return {'ok': S['sess'] is not None}
