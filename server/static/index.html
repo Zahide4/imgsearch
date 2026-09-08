@@ -71,23 +71,37 @@ body.searching .hero{max-height:0;opacity:0}
   letter-spacing:-.045em;color:var(--label);
   font-variant-numeric:tabular-nums;font-feature-settings:"tnum";
   animation:rise .6s var(--ease) both}
-.odo-col{display:block;height:1em;overflow:hidden}
+.odo-col{display:block;height:1em;overflow:hidden;position:relative}
 .odo-strip{display:block;will-change:transform;transition:transform 1s var(--ease)}
-.odo-strip i{display:block;height:1em;line-height:1;font-style:normal}
+.odo-strip i{display:flex;align-items:center;justify-content:center;
+  height:1em;line-height:1;font-style:normal}
 .odo-sep{display:block}
-.count-sub{margin:var(--s4) 0 0;font-size:var(--t2);font-weight:400;
+.count-sub{margin:var(--s4) 0 0;font-size:var(--t3);font-weight:400;
   color:var(--label-2);letter-spacing:0;
   animation:rise .6s var(--ease) .06s both}
 
 /* ---------- field ---------- */
-.searchbox{display:flex;align-items:center;gap:var(--s3);
-  height:56px;padding:0 var(--s4);margin:0 0 var(--s4);
-  background:var(--fill);border-radius:var(--r-lg);
-  border:1px solid transparent;
-  transition:background .22s var(--ease),border-color .22s var(--ease);
+.searchbox{display:flex;align-items:center;gap:var(--s4);
+  width:min(640px,100%);height:62px;padding:0 var(--s6);margin:0 auto var(--s5);
+  border-radius:999px;text-align:left;
+  background:linear-gradient(180deg,rgba(255,255,255,.075),rgba(255,255,255,.022));
+  backdrop-filter:blur(24px) saturate(180%);
+  box-shadow:inset 0 1.5px 0 rgba(255,255,255,.26),
+             inset 0 0 0 1px rgba(255,255,255,.12),
+             inset 0 -1px 0 rgba(255,255,255,.05),
+             0 10px 34px rgba(0,0,0,.55);
+  transition:box-shadow .3s var(--ease),transform .3s var(--ease),
+             background .3s var(--ease);
   animation:rise .6s var(--ease) .12s both}
-.searchbox:hover{background:var(--fill-hi)}
-.searchbox:focus-within{background:var(--elev-2);border-color:var(--sep)}
+.searchbox:hover{transform:translateY(-1px);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.2),
+             inset 0 0 0 1px rgba(255,255,255,.11),
+             0 14px 40px rgba(0,0,0,.6)}
+.searchbox:focus-within{
+  background:linear-gradient(180deg,rgba(255,255,255,.1),rgba(255,255,255,.035));
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.24),
+             inset 0 0 0 1px rgba(255,255,255,.16),
+             0 16px 48px rgba(0,0,0,.65)}
 .searchbox .glyph{flex:none;width:18px;height:18px;color:var(--label-3);
   transition:color .22s var(--ease)}
 .searchbox:focus-within .glyph{color:var(--label-2)}
@@ -98,8 +112,9 @@ body.searching .hero{max-height:0;opacity:0}
   font-variant-numeric:tabular-nums;letter-spacing:.01em}
 .lat b{color:var(--label-2);font-weight:590}
 
-.meta{display:flex;align-items:center;gap:var(--s5);flex-wrap:wrap;
-  min-height:22px;margin:0 0 var(--s5);font-size:var(--t2);color:var(--label-2);
+.meta{display:flex;align-items:center;justify-content:center;gap:var(--s5);
+  flex-wrap:wrap;min-height:22px;margin:0 auto var(--s5);
+  font-size:var(--t2);color:var(--label-2);
   animation:rise .6s var(--ease) .18s both}
 .meta label{display:inline-flex;align-items:center;gap:var(--s2);
   cursor:pointer;user-select:none;transition:color .2s var(--ease)}
@@ -193,25 +208,35 @@ body.searching .hero{max-height:0;opacity:0}
    Stage. At rest the page is a centred composition; searching docks it to a
    compact bar and hands the viewport to results. One class drives both.
    ========================================================================= */
-#aura{position:fixed;inset:0;z-index:0;pointer-events:none;opacity:0;
-  transition:opacity 1.4s var(--ease)}
+/* Drawn small and blurred hard in CSS. Without the blur the quarter-res
+   canvas bands visibly when scaled up -- which is what made it look broken
+   rather than ambient. The blur also lets the resolution stay low. */
+#aura{position:fixed;inset:-20%;width:140%;height:140%;z-index:0;
+  pointer-events:none;opacity:0;filter:blur(90px) saturate(130%);
+  transition:opacity 1.8s var(--ease)}
 #aura.on{opacity:1}
+/* Vignette: keeps the centre near-black so text sits on the ground the
+   colour ramp was measured against, while the warmth stays at the edges. */
+#aura-veil{position:fixed;inset:0;z-index:0;pointer-events:none;
+  background:radial-gradient(ellipse 78% 62% at 50% 42%,
+    rgba(0,0,0,.86) 0%, rgba(0,0,0,.55) 45%, rgba(0,0,0,.12) 100%)}
 .wrap{position:relative;z-index:1}
 
-.stage{display:flex;flex-direction:column;justify-content:center;
-  min-height:78vh;padding:var(--s8) 0 var(--s7);
+.stage{display:flex;flex-direction:column;align-items:center;justify-content:center;
+  min-height:82vh;padding:var(--s8) 0 var(--s7);text-align:center;
   transition:min-height .6s var(--ease),padding .6s var(--ease)}
-body.searching .stage{min-height:0;padding:var(--s5) 0 0}
+body.searching .stage{min-height:0;padding:var(--s4) 0 var(--s2)}
 
 .bar{position:sticky;top:0;z-index:20;background:transparent;padding:0}
 body.searching .bar{background:rgba(0,0,0,.72);backdrop-filter:saturate(180%) blur(24px)}
 
 .hero-inner{padding:0 0 var(--s7);transition:padding .6s var(--ease)}
-.count{justify-content:flex-start}
+.count{justify-content:center}
 
 /* the field carries search state: idle, focused, working */
 .searchbox{position:relative;overflow:hidden}
-.searchbox .track{position:absolute;left:0;right:0;bottom:0;height:2px;
+.searchbox .track{position:absolute;left:8%;right:8%;bottom:0;height:2px;
+  border-radius:999px;
   transform:scaleX(0);transform-origin:0 50%;opacity:0;
   background:linear-gradient(90deg,transparent,var(--label),transparent);
   transition:opacity .2s var(--ease)}
@@ -252,6 +277,7 @@ body.working .searchbox .track{opacity:.9;animation:sweep 1.15s var(--ease) infi
 </head>
 <body>
 <canvas id="aura" aria-hidden="true"></canvas>
+<div id="aura-veil" aria-hidden="true"></div>
 <div class="wrap">
 
   <div class="bar">
@@ -654,20 +680,20 @@ const strip = s => esc(s).replace(/\s+/g,' ').slice(0,60);
   const cv = document.getElementById('aura');
   if(!cv || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
   const ctx = cv.getContext('2d');
-  const DPR = 0.25;                       // deliberately low; everything is blurred
+  const DPR = 0.16;                       // CSS blur does the smoothing
   let w = 0, h = 0;
   const resize = () => {
-    w = cv.width  = Math.max(1, Math.round(innerWidth  * DPR));
-    h = cv.height = Math.max(1, Math.round(innerHeight * DPR));
+    w = cv.width  = Math.max(1, Math.round(innerWidth  * 1.4 * DPR));
+    h = cv.height = Math.max(1, Math.round(innerHeight * 1.4 * DPR));
   };
   resize();
   if (typeof addEventListener === 'function') addEventListener('resize', resize);
 
   const blobs = [
-    {x:.24,y:.30,r:.52,c:[ 96,132,255], p:0},
-    {x:.74,y:.24,r:.46,c:[168, 96,255], p:2.1},
-    {x:.58,y:.76,r:.55,c:[ 64,196,196], p:4.2},
-    {x:.16,y:.78,r:.40,c:[255,128,168], p:1.2},
+    {x:.26,y:.28,r:.58,c:[214,182,146], p:0  },   // warm sand
+    {x:.76,y:.22,r:.50,c:[196,150,128], p:2.1},   // bronze
+    {x:.62,y:.78,r:.62,c:[168,158,178], p:4.2},   // cool grey, for depth
+    {x:.14,y:.74,r:.44,c:[226,206,178], p:1.2},   // cream
   ];
   let energy = 0, target = 0, t = 0;
   globalThis.__auraEnergy = v => { target = v; };
@@ -682,7 +708,7 @@ const strip = s => esc(s).replace(/\s+/g,' ').slice(0,60);
       const x = (b.x + Math.cos(t + b.p) * drift) * w;
       const y = (b.y + Math.sin(t * 0.82 + b.p) * drift) * h;
       const r = b.r * Math.max(w,h) * (1 + energy * 0.10);
-      const a = (0.16 + energy * 0.20);
+      const a = (0.15 + energy * 0.20);
       const g = ctx.createRadialGradient(x,y,0,x,y,r);
       g.addColorStop(0, `rgba(${b.c[0]},${b.c[1]},${b.c[2]},${a})`);
       g.addColorStop(1, `rgba(${b.c[0]},${b.c[1]},${b.c[2]},0)`);
