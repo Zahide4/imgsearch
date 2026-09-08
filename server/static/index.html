@@ -177,6 +177,10 @@ function render(){
       <p>Small corpus &mdash; that is the signal you are testing for.</p></div>`;
     return;
   }
+  // The origin image URL is the `url` parameter we passed to the proxy.
+  const originOf = t => { try { return new URL(t, location.href).searchParams.get('url') || ''; }
+                          catch (e) { return ''; } };
+
   outEl.innerHTML = `<div class="grid">` + results.map((r,i)=>{
     const sa = r.license_class === 'share_alike';
     return `<div class="card" data-i="${i}" draggable="true">
@@ -190,7 +194,36 @@ function render(){
 
   outEl.querySelectorAll('.card').forEach(c=>{
     const i = +c.dataset.i;
-    c.querySelector('img').onerror = () => { c.style.opacity='.45'; c.title='Image unavailable at its source'; };
+    // Thumbnail recovery chain.
+    //
+    // wsrv.nl is a shared free proxy, so Flickr and Wikimedia rate-limit ITS
+    // IPs, not ours. It then reports that upstream 429 back to us as a 404.
+    // Measured on a 60-result page: 6 broken, and all 6 origins returned 200
+    // when fetched directly. So the image is fine; the proxy was throttled.
+    //
+    // 1. retry the proxy once -- 429s are transient and wsrv caches successes,
+    //    so the second attempt usually lands
+    // 2. fall back to the origin URL, which is not rate-limited for us
+    // 3. only then mark it unavailable
+    const img = c.querySelector('img');
+    img.dataset.stage = '0';
+    img.onerror = () => {
+      const r = results[i], stage = img.dataset.stage;
+      if (stage === '0') {
+        img.dataset.stage = '1';
+        setTimeout(() => { img.src = r.thumb + '&_r=1'; }, 700);
+      } else if (stage === '1' && originOf(r.thumb)) {
+        // NOT r.full_url -- that is the Flickr/Wikimedia landing PAGE and
+        // returns text/html (verified: magic bytes 3c21444f = "<!DO").
+        // Setting it as img.src swaps a broken image for a 500KB HTML doc.
+        // The real image URL is the one we handed the proxy.
+        img.dataset.stage = '2';
+        img.src = originOf(r.thumb);            // full size, but it renders
+      } else {
+        c.style.opacity = '.45';
+        c.title = 'Thumbnail unavailable (image proxy was rate-limited)';
+      }
+    };
     c.onclick = () => { sel = i; mark(); copyImage(results[i]); };
     c.ondragstart = e => {
       const r = results[i];
