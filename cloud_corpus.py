@@ -15,6 +15,7 @@ import re
 import string
 import tarfile
 import time
+import unicodedata
 from collections import deque
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
@@ -83,7 +84,13 @@ def params_for(start, end, continuation):
     if end is not None:
         params['gaito'] = end
     params.update(continuation)  # retain gaifrom during imageinfo continuation
-    return params
+    # MediaWiki rejects parameters that are not NFC-normalized with
+    # `urlparamnormal`. Continuation cursors are filenames handed back to us
+    # by the API, and Commons contains names in decomposed form, so echoing
+    # one back verbatim eventually kills the worker. Two workers died this
+    # way ~23 pages in.
+    return {k: unicodedata.normalize('NFC', v) if isinstance(v, str) else v
+            for k, v in params.items()}
 
 
 def clean_url(url):
@@ -244,10 +251,20 @@ async def run(args):
             r = await request(client, COMMONS, params=params_for(job['start'], job['end'], job['continue']))
             data = r.json()
             if data.get('error'):
-                if data['error'].get('code') in ('maxlag', 'ratelimited'):
+                code = data['error'].get('code')
+                if code in ('maxlag', 'ratelimited'):
                     await asyncio.sleep(30)
                     continue
-                raise RuntimeError(f"Commons API error: {data['error'].get('code')}")
+                if code == 'urlparamnormal':
+                    # One unrepresentable cursor should cost a range, not a
+                    # worker. Drop this job, keep whatever it already indexed,
+                    # and move to the next range.
+                    print(f'worker {args.worker}: dropping range '
+                          f'{job["start"]!r} after {code}', flush=True)
+                    queue.popleft()
+                    save()
+                    continue
+                raise RuntimeError(f"Commons API error: {code}")
             rows = [row for p in data.get('query', {}).get('pages', []) if (row := metadata(p, job['end']))]
             rows = list({row['image_id']: row for row in rows}.values())
             if rows:
