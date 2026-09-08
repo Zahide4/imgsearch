@@ -51,6 +51,20 @@
       background-size:220% 100%;animation:sk 1.4s ease-in-out infinite;opacity:1;transition:opacity .2s}
   .card.done::after{opacity:0;animation:none}
   @keyframes sk{0%{background-position:130% 0}100%{background-position:-30% 0}}
+  .card.busy::before{content:'';position:absolute;z-index:3;inset:0;
+      background:rgba(0,0,0,.55);backdrop-filter:blur(1px)}
+  .card .prog{position:absolute;z-index:4;inset:0;display:none;
+      align-items:center;justify-content:center;flex-direction:column;gap:8px;
+      font-size:11px;color:var(--fg);letter-spacing:.02em}
+  .card.busy .prog,.card.copied .prog{display:flex}
+  .card .ring{width:30px;height:30px;border-radius:50%;
+      border:2.5px solid rgba(255,255,255,.18);border-top-color:var(--accent);
+      animation:spin .7s linear infinite}
+  .card.copied::before{content:'';position:absolute;z-index:3;inset:0;
+      background:rgba(11,40,25,.62)}
+  .card.copied .ring{animation:none;border:none;width:auto;height:auto;
+      font-size:22px;color:var(--ok)}
+  @keyframes spin{to{transform:rotate(360deg)}}
   .card .info{position:absolute;inset:auto 0 0 0;padding:22px 10px 8px;
       background:linear-gradient(transparent,rgba(0,0,0,.93));
       opacity:0;transition:opacity .12s}
@@ -108,6 +122,11 @@ const $  = s => document.querySelector(s);
 const qEl = $('#q'), outEl = $('#out'), latEl = $('#lat');
 let results = [], sel = -1, ctrl = null, timer = null, generation = 0;
 let warmCtl = null;
+
+// The origin image URL is the `url` parameter we passed to the proxy.
+// Module scope on purpose: both render() and copyImage() need it.
+const originOf = t => { try { return new URL(t, location.href).searchParams.get('url') || ''; }
+                        catch (e) { return ''; } };
 
 const EXAMPLES = ["v12 engine cutaway","human heart anatomy","brushed metal texture",
   "misty forest at dawn","vintage typewriter","art deco poster","circuit board macro",
@@ -186,15 +205,12 @@ function render(){
       <p>Small corpus &mdash; that is the signal you are testing for.</p></div>`;
     return;
   }
-  // The origin image URL is the `url` parameter we passed to the proxy.
-  const originOf = t => { try { return new URL(t, location.href).searchParams.get('url') || ''; }
-                          catch (e) { return ''; } };
-
   outEl.innerHTML = `<div class="grid">` + results.map((r,i)=>{
     const sa = r.license_class === 'share_alike';
     return `<div class="card" data-i="${i}" draggable="true">
       <img src="${esc(r.thumb)}" loading="${i<12?'eager':'lazy'}" fetchpriority="${i<4?'high':'auto'}" decoding="async" alt="${esc(r.title)}" referrerpolicy="no-referrer">
       <span class="dim">${r.width}&times;${r.height}</span>
+      <div class="prog"><div class="ring"></div><span class="ptxt"></span></div>
       <div class="info">
         <div class="t">${esc(r.title)}</div>
         <div class="l ${sa?'sa':''}">${esc(r.license)} &middot; ${r.score}</div>
@@ -296,35 +312,72 @@ function mark(){
 }
 
 async function copyImage(r){
+  const idx = results.indexOf(r);
+  const card = outEl.querySelector(`.card[data-i="${idx}"]`);
+  const setState = (cls, txt) => {
+    if(!card) return;
+    card.classList.remove('busy','copied');
+    if(cls) card.classList.add(cls);
+    const t = card.querySelector('.ptxt'); if(t) t.textContent = txt || '';
+    const ring = card.querySelector('.ring');
+    if(ring) ring.textContent = cls === 'copied' ? '\u2713' : '';
+  };
+
+  // Copy the FULL-RESOLUTION original, not the 384px grid thumbnail.
+  // A 384px copy is fine for a mood board and useless in Premiere or
+  // Photoshop, which is who this is for. Full-res costs seconds and several
+  // MB, so the card shows progress instead of appearing frozen.
+  const el = card && card.querySelector('img');
+  const full = originOf(r.thumb) || (el && el.currentSrc) || r.thumb;
+
+  setState('busy','fetching');
   try{
-    // Use the URL that actually rendered. r.thumb is the proxy URL, and for
-    // any image recovered via the origin fallback that URL is exactly the one
-    // that 429'd -- so copying it failed on precisely the images the user
-    // could see on screen.
-    const el = outEl.querySelector(`.card[data-i="${results.indexOf(r)}"] img`);
-    const src = (el && el.currentSrc) || r.thumb;
-    let response = await fetch(src);
-    if(!response.ok && src !== r.thumb) response = await fetch(r.thumb);
-    if(!response.ok) throw new Error('Image unavailable');
-    const blob = await response.blob();
-    // clipboard only accepts png, so transcode through a canvas
+    const resp = await fetch(full);
+    if(!resp.ok) throw new Error('unavailable');
+
+    // Stream so the percentage is real, not a fake animation.
+    // Not every origin sends content-length -- Wikimedia does, rawpixel does
+    // not (chunked). So show a percentage when we can and downloaded size when
+    // we cannot, rather than a bar that silently never moves.
+    const total = +(resp.headers.get('content-length') || 0);
+    let blob;
+    if(resp.body && resp.body.getReader){
+      const reader = resp.body.getReader();
+      const parts = []; let got = 0, last = 0;
+      for(;;){
+        const {done, value} = await reader.read();
+        if(done) break;
+        parts.push(value); got += value.length;
+        if(got - last > 65536){                       // don't thrash the DOM
+          last = got;
+          setState('busy', total ? Math.round(got/total*100) + '%'
+                                 : (got/1e6).toFixed(1) + ' MB');
+        }
+      }
+      blob = new Blob(parts);
+    } else {
+      blob = await resp.blob();
+    }
+
+    setState('busy','processing');
     const bmp = await createImageBitmap(blob);
-    // Cap the clipboard image. An origin-fallback thumbnail is the full-size
-    // master -- one measured at 4794x2532, which transcodes to a 19 MB
-    // lossless PNG. Downscaling to 2048px longest side keeps it usable in
-    // Photoshop or Premiere without putting tens of megabytes on the
-    // clipboard for a single drag.
-    const MAX = 2048;
-    const scale = Math.min(1, MAX / Math.max(bmp.width, bmp.height));
-    const w = Math.max(1, Math.round(bmp.width * scale));
-    const h = Math.max(1, Math.round(bmp.height * scale));
-    const cv = Object.assign(document.createElement('canvas'), {width: w, height: h});
+    const MAX = 4096;                       // generous for editing, still bounded
+    const sc = Math.min(1, MAX / Math.max(bmp.width, bmp.height));
+    const w = Math.max(1, Math.round(bmp.width*sc)), h = Math.max(1, Math.round(bmp.height*sc));
+    const cv = Object.assign(document.createElement('canvas'), {width:w, height:h});
     cv.getContext('2d').drawImage(bmp, 0, 0, w, h);
     const png = await new Promise(res => cv.toBlob(res, 'image/png'));
+
     await navigator.clipboard.write([new ClipboardItem({'image/png': png})]);
-    toast('Copied — ' + (r.creator ? r.license + ', ' + strip(r.creator) : r.license));
-  }catch(e){ toast('Copy failed: ' + e.message); }
+    setState('copied','');
+    toast(`Copied ${w}\u00d7${h} \u00b7 ${(png.size/1e6).toFixed(1)} MB \u00b7 ${r.license}`);
+    setTimeout(() => setState(null,''), 1400);
+  }catch(e){
+    setState(null,'');
+    toast('Copy failed: ' + (e.message || e.name));
+  }
 }
+
 
 document.addEventListener('keydown', e=>{
   if(e.key === 'ArrowRight' && document.activeElement !== qEl || e.key === 'ArrowRight' && qEl.selectionStart === qEl.value.length){
