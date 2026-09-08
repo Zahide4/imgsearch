@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
     inputs:
       target_per_worker:
-        description: Images to add per worker (four workers)
+        description: Images to add per worker (20 workers)
         default: '100'
         required: true
       build:
@@ -21,9 +21,13 @@ jobs:
     timeout-minutes: 330
     strategy:
       fail-fast: false
-      max-parallel: 4
+      # GitHub Free allows 20 concurrent jobs, and each runner has its own
+      # IP, so this is 20 independent crawlers rather than 20x the load
+      # from one address. Measured ~1.75 img/s per worker, so 4 workers
+      # meant ~20h for 500k; 20 workers brings it to ~4h, inside one run.
+      max-parallel: 20
       matrix:
-        worker: [0, 1, 2, 3]
+        worker: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19]
     env:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
       HF_REPO: ${{ secrets.HF_REPO }}
@@ -47,4 +51,4 @@ jobs:
           TARGET: ${{ inputs.target_per_worker }}
           BUILD: ${{ inputs.build }}
           WORKER: ${{ matrix.worker }}
-        run: python cloud_corpus.py --worker "$WORKER" --workers 4 --target "$TARGET" --build "$BUILD"
+        run: python cloud_corpus.py --worker "$WORKER" --workers 20 --target "$TARGET" --build "$BUILD"
