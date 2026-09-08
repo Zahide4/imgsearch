@@ -23,7 +23,8 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 import numpy as np
 from PIL import Image, ImageOps
-from huggingface_hub import HfApi, hf_hub_download
+from huggingface_hub import CommitOperationAdd, HfApi, hf_hub_download
+from huggingface_hub.errors import HfHubHTTPError
 from huggingface_hub.errors import EntryNotFoundError
 from qdrant_client import QdrantClient, models
 
@@ -173,9 +174,17 @@ class Archive:
     def add(self, row, webp):
         self.pending.append((row, webp))
 
-    def flush(self):
+    def build(self):
+        """Write the tarball and return a commit operation, without committing.
+
+        Hugging Face allows 128 repository commits per hour. Committing the
+        archive and the checkpoint separately means two commits per save per
+        worker; at 20 workers that is ~300/hour and the run dies partway
+        through. Returning the operation lets the caller put both in one
+        commit.
+        """
         if not self.pending:
-            return
+            return None
         digest = hashlib.sha256(''.join(r['image_id'] for r, _ in self.pending).encode()).hexdigest()[:20]
         path = self.root / f'{digest}.tar'
         with tarfile.open(path, 'w') as tar:
@@ -185,10 +194,11 @@ class Archive:
                     info = tarfile.TarInfo(name)
                     info.size = len(data)
                     tar.addfile(info, io.BytesIO(data))
-        self.hf.upload_file(path_or_fileobj=str(path), path_in_repo=f'webdataset/{path.name}',
-                            repo_id=self.repo, repo_type='dataset', commit_message='Archive licensed image derivatives and provenance')
+        data = path.read_bytes()
         path.unlink()
         self.pending.clear()
+        return CommitOperationAdd(path_in_repo=f'webdataset/{path.name}',
+                                  path_or_fileobj=data)
 
 
 async def run(args):
@@ -236,14 +246,32 @@ async def run(args):
     sem = asyncio.Semaphore(int(os.getenv('FETCH_CONCURRENCY', '6')))
 
     def save():
-        archive.flush()  # Don't advance durable cursor ahead of the archive.
+        # Archive first, so the durable cursor never runs ahead of the data.
+        ops = []
+        archive_op = archive.build()
+        if archive_op:
+            ops.append(archive_op)
         for i in range(0, len(pending_points), 128):
             qc.upsert(COLLECTION, points=pending_points[i:i + 128], wait=True)
         pending_points.clear()
         staged_ids.clear()
         state = json.dumps({'queue': list(queue), 'uploaded': done, 'pages': pages}).encode()
-        hf.upload_file(path_or_fileobj=state, path_in_repo=checkpoint, repo_id=repo, repo_type='dataset',
-                       commit_message=f'Checkpoint worker {args.worker}: {done} images')
+        ops.append(CommitOperationAdd(path_in_repo=checkpoint, path_or_fileobj=state))
+
+        # A commit rate limit should pause a worker, not kill it. HF answers
+        # 429 with "retry in about an hour", so back off long and hard rather
+        # than losing the range this worker has already crawled.
+        for attempt in range(6):
+            try:
+                hf.create_commit(repo_id=repo, repo_type='dataset', operations=ops,
+                                 commit_message=f'Worker {args.worker}: {done} images')
+                return
+            except HfHubHTTPError as exc:
+                if getattr(exc.response, 'status_code', None) != 429 or attempt == 5:
+                    raise
+                wait = min(900, 60 * 2 ** attempt)
+                print(f'worker {args.worker}: HF 429, sleeping {wait}s', flush=True)
+                time.sleep(wait)
 
     async with httpx.AsyncClient(headers={'User-Agent': UA}, follow_redirects=True) as client:
         while queue and done < args.target and time.monotonic() - start_time < args.max_seconds:
@@ -304,7 +332,9 @@ async def run(args):
             empty = empty + 1 if rows and not loaded else 0
             print(json.dumps({'worker': args.worker, 'uploaded': done, 'target': args.target,
                               'pages': pages, 'failed': failed, 'images_per_second': round(done / max(time.monotonic()-start_time, 1), 2)}), flush=True)
-            if len(archive.pending) >= 1000:
+            # 128 commits/hour across the repo. One commit per save, 20
+            # workers, ~2 img/s each -> 4000 keeps the whole fleet near 36/hour.
+            if len(archive.pending) >= int(os.getenv('FLUSH_EVERY', '4000')):
                 save()
             if empty >= 10:
                 save()
