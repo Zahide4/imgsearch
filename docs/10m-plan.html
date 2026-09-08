@@ -1,0 +1,509 @@
+<title>Ten Million Images</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  :root{
+    --ground:#FBFAF8;
+    --surface:#FFFFFF;
+    --raise:#F3F2EE;
+    --ink:#17191A;
+    --ink-2:#4A4F51;
+    --muted:#767C7E;
+    --line:#E2E0DA;
+    --line-2:#CFCCC4;
+    --accent:#0B6E67;
+    --accent-soft:#E4EFEC;
+    --warn:#9A5B12;
+    --warn-soft:#F6EDE0;
+    --stop:#8E3A32;
+    --stop-soft:#F7E9E6;
+    --go:#2A6340;
+
+    --measure:68ch;
+    --step--1:0.815rem;
+    --step-0:1rem;
+    --step-1:1.24rem;
+    --step-2:1.58rem;
+    --step-3:2.05rem;
+    --step-4:2.85rem;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --ground:#131514;
+      --surface:#1A1D1C;
+      --raise:#212524;
+      --ink:#ECEBE6;
+      --ink-2:#BEC1BD;
+      --muted:#8B918D;
+      --line:#2C302E;
+      --line-2:#3D423F;
+      --accent:#5FBCAF;
+      --accent-soft:#16302C;
+      --warn:#D9A05B;
+      --warn-soft:#2E2417;
+      --stop:#D98A7E;
+      --stop-soft:#2E1D1A;
+      --go:#6FB98A;
+    }
+  }
+  :root[data-theme="dark"]{
+    --ground:#131514;
+    --surface:#1A1D1C;
+    --raise:#212524;
+    --ink:#ECEBE6;
+    --ink-2:#BEC1BD;
+    --muted:#8B918D;
+    --line:#2C302E;
+    --line-2:#3D423F;
+    --accent:#5FBCAF;
+    --accent-soft:#16302C;
+    --warn:#D9A05B;
+    --warn-soft:#2E2417;
+    --stop:#D98A7E;
+    --stop-soft:#2E1D1A;
+    --go:#6FB98A;
+  }
+
+  *{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%}
+  body{
+    margin:0;background:var(--ground);color:var(--ink);
+    font-family:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+    font-size:var(--step-0);line-height:1.62;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:78rem;margin:0 auto;padding:0 clamp(1.1rem,4vw,3rem)}
+  .col{max-width:var(--measure)}
+
+  /* ---------- masthead ---------- */
+  header.mast{border-bottom:1px solid var(--line);padding:clamp(3rem,7vw,5.5rem) 0 clamp(2rem,4vw,3rem)}
+  .eyebrow{
+    font-family:"IBM Plex Mono",ui-monospace,monospace;
+    font-size:var(--step--1);letter-spacing:.1em;text-transform:uppercase;
+    color:var(--accent);margin:0 0 1.1rem;
+  }
+  h1{
+    font-family:Newsreader,Georgia,serif;font-weight:500;
+    font-size:clamp(2.4rem,6.5vw,var(--step-4));line-height:1.06;
+    letter-spacing:-.015em;margin:0 0 1.1rem;text-wrap:balance;
+  }
+  .standfirst{
+    font-family:Newsreader,Georgia,serif;font-size:var(--step-1);
+    line-height:1.5;color:var(--ink-2);margin:0;max-width:56ch;
+  }
+  .mast-meta{
+    display:flex;flex-wrap:wrap;gap:1.6rem 2.6rem;margin-top:2.4rem;
+    font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:var(--step--1);
+  }
+  .mast-meta div span{display:block;color:var(--muted);letter-spacing:.06em;text-transform:uppercase;font-size:.72rem}
+  .mast-meta div b{font-weight:500;color:var(--ink);font-variant-numeric:tabular-nums}
+
+  /* ---------- sections ---------- */
+  main{padding-bottom:6rem}
+  section{padding-top:clamp(2.6rem,5vw,4rem)}
+  h2{
+    font-family:Newsreader,Georgia,serif;font-weight:500;
+    font-size:var(--step-3);line-height:1.15;letter-spacing:-.01em;
+    margin:0 0 .5rem;text-wrap:balance;
+  }
+  h3{
+    font-size:var(--step-1);font-weight:600;line-height:1.3;
+    margin:2.2rem 0 .5rem;letter-spacing:-.005em;
+  }
+  .sec-note{color:var(--muted);margin:0 0 1.8rem;max-width:60ch}
+  p{margin:0 0 1rem}
+  a{color:var(--accent)}
+  strong{font-weight:600}
+  code,kbd{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.88em;
+    background:var(--raise);padding:.12em .38em;border-radius:3px;color:var(--ink)}
+
+  /* ---------- the thesis panel ---------- */
+  .thesis{
+    background:var(--accent-soft);border-left:3px solid var(--accent);
+    padding:1.5rem 1.7rem;margin:0 0 1.5rem;max-width:var(--measure);
+  }
+  .thesis p{margin:0;font-family:Newsreader,Georgia,serif;font-size:var(--step-1);line-height:1.48}
+  .thesis p + p{margin-top:.8rem}
+
+  /* ---------- pipeline (a real ordered sequence) ---------- */
+  ol.pipeline{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:1px;
+    background:var(--line);border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+  ol.pipeline > li{background:var(--ground);padding:1.5rem 0;display:grid;
+    grid-template-columns:3.2rem minmax(0,1fr);gap:0 1.4rem;align-items:start}
+  .stage-n{
+    font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:var(--step--1);
+    color:var(--accent);letter-spacing:.06em;padding-top:.28rem;
+  }
+  .stage-h{font-size:var(--step-1);font-weight:600;margin:0 0 .1rem;line-height:1.3}
+  .stage-where{
+    font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.78rem;
+    color:var(--muted);margin:0 0 .7rem;letter-spacing:.02em;
+  }
+  .stage-body{max-width:62ch}
+  .stage-body p{margin:0 0 .6rem}
+  .stage-body p:last-child{margin-bottom:0}
+
+  /* ---------- tables ---------- */
+  .tablewrap{overflow-x:auto;margin:1.2rem 0 1.6rem;border:1px solid var(--line);background:var(--surface)}
+  table{border-collapse:collapse;width:100%;font-size:var(--step--1);min-width:34rem}
+  caption{caption-side:top;text-align:left;padding:.9rem 1rem;color:var(--muted);
+    font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.76rem;
+    letter-spacing:.08em;text-transform:uppercase;border-bottom:1px solid var(--line)}
+  th,td{padding:.62rem 1rem;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+  thead th{font-weight:600;color:var(--ink);background:var(--raise);white-space:nowrap}
+  tbody tr:last-child td{border-bottom:none}
+  td.num,th.num{text-align:right;font-family:"IBM Plex Mono",ui-monospace,monospace;
+    font-variant-numeric:tabular-nums;white-space:nowrap}
+  tr.total td{font-weight:600;background:var(--raise)}
+  .pill{display:inline-block;font-family:"IBM Plex Mono",ui-monospace,monospace;
+    font-size:.72rem;letter-spacing:.05em;padding:.14em .5em;border-radius:2px;white-space:nowrap}
+  .pill.go{background:var(--accent-soft);color:var(--accent)}
+  .pill.warn{background:var(--warn-soft);color:var(--warn)}
+  .pill.stop{background:var(--stop-soft);color:var(--stop)}
+
+  /* ---------- measured findings ---------- */
+  .findings{display:grid;gap:1px;background:var(--line);border:1px solid var(--line);margin:1.4rem 0}
+  .finding{background:var(--surface);padding:1.25rem 1.4rem;display:grid;
+    grid-template-columns:minmax(0,1fr);gap:.55rem}
+  .finding .num{
+    font-family:"IBM Plex Mono",ui-monospace,monospace;font-variant-numeric:tabular-nums;
+    font-size:var(--step-2);line-height:1;color:var(--accent);letter-spacing:-.02em;
+  }
+  .finding .num.warn{color:var(--warn)}
+  .finding .num.stop{color:var(--stop)}
+  .finding h4{margin:0;font-size:var(--step-0);font-weight:600;line-height:1.35}
+  .finding p{margin:0;color:var(--ink-2);font-size:var(--step--1);line-height:1.55}
+  @media (min-width:52rem){
+    .findings{grid-template-columns:repeat(2,1fr)}
+  }
+
+  /* ---------- traps ---------- */
+  .trap{border:1px solid var(--line);border-left:3px solid var(--stop);
+    background:var(--surface);padding:1.15rem 1.3rem;margin:0 0 1px;max-width:var(--measure)}
+  .trap h4{margin:0 0 .35rem;font-size:var(--step-0);font-weight:600}
+  .trap p{margin:0;color:var(--ink-2);font-size:var(--step--1);line-height:1.55}
+  .trap p + p{margin-top:.5rem}
+  .trapstack{display:flex;flex-direction:column;gap:1px;background:var(--line);
+    border:1px solid var(--line);margin:1.3rem 0;max-width:var(--measure)}
+  .trapstack .trap{border:none;border-left:3px solid var(--stop);margin:0}
+
+  /* ---------- risk list ---------- */
+  ul.risks{list-style:none;margin:1.2rem 0 0;padding:0;max-width:var(--measure)}
+  ul.risks li{padding:1rem 0;border-bottom:1px solid var(--line);display:grid;
+    grid-template-columns:auto minmax(0,1fr);gap:0 1rem;align-items:baseline}
+  ul.risks li:last-child{border-bottom:none}
+  ul.risks .lbl{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.72rem;
+    letter-spacing:.07em;text-transform:uppercase;color:var(--muted)}
+  ul.risks p{margin:0;font-size:var(--step--1);color:var(--ink-2)}
+  ul.risks b{color:var(--ink);font-weight:600;display:block;font-size:var(--step-0);margin-bottom:.15rem}
+
+  hr.rule{border:none;border-top:1px solid var(--line);margin:0}
+  footer{border-top:1px solid var(--line);padding:2.2rem 0 4rem;color:var(--muted);font-size:var(--step--1)}
+  footer p{max-width:var(--measure)}
+
+  :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+
+<div class="wrap">
+  <header class="mast">
+    <p class="eyebrow">Architecture plan &middot; rebuild from scratch</p>
+    <h1>Ten Million Images</h1>
+    <p class="standfirst">What the 500k prototype proved, what it cost, and the one architectural decision that has to change before building the real thing.</p>
+    <div class="mast-meta">
+      <div><span>Prototype corpus</span><b>12,345 &rarr; 500k</b></div>
+      <div><span>Target corpus</span><b>10M &ndash; 100M</b></div>
+      <div><span>Run cost at 10M</span><b>~$16 / month</b></div>
+      <div><span>Run cost at 100M</span><b>~$45 / month</b></div>
+    </div>
+  </header>
+
+  <main>
+
+    <section>
+      <h2>The one thing that changes</h2>
+      <p class="sec-note">Everything else in the prototype scales. This does not.</p>
+      <div class="thesis">
+        <p><strong>Generate and store your own thumbnails.</strong> The prototype served images by asking a free shared proxy to resize originals on demand. That single decision produced every serving problem encountered: broken images, 2.5&thinsp;second museum loads, copy failures, and finally an outright block when we tried to pre-warm the cache.</p>
+        <p>At 10M the proxy is not a shortcut with rough edges. It is a dependency that rate-limits you, fingerprints your tooling, and cannot be warmed.</p>
+      </div>
+      <div class="col">
+        <p>The fix is unglamorous and cheap: during ingest, resize once to a 384&thinsp;px WebP and <code>PUT</code> it to your own bucket. Backblaze B2 charges nothing for uploads and $0.006/GB; Cloudflare R2 charges $4.50 per million writes and $0.015/GB, both with zero egress behind Cloudflare.</p>
+        <p>At the 22&thinsp;KB average measured across the prototype corpus, that is <strong>$1.32/month at 10M</strong> and <strong>$13/month at 100M</strong>. The thumbnails were never the expensive part &mdash; the vector store is.</p>
+      </div>
+    </section>
+
+    <section>
+      <h2>Pipeline</h2>
+      <p class="sec-note">Five stages, genuinely ordered &mdash; each consumes the previous stage's output. Stages&nbsp;1&ndash;4 run offline and can be interrupted; only stage&nbsp;5 serves traffic.</p>
+      <ol class="pipeline">
+        <li>
+          <div class="stage-n">01</div>
+          <div class="stage-body">
+            <p class="stage-h">Discover by enumeration, not search</p>
+            <p class="stage-where">Commons <code>generator=allimages</code> &middot; sharded by <code>gaifrom</code></p>
+            <p>Search only surfaces subjects you thought to type. The prototype's 88 hand-written topics yielded ~143 images each and capped at 12.6k no matter how many machines were added. Enumeration walks the whole namespace instead, and <code>gaifrom</code> splits it cleanly across workers.</p>
+            <p>Ask the API for <code>iiurlwidth=800</code> so it returns pre-rendered thumbnails. Two other approaches were tested and both failed: <code>list=allimages</code> returns only 12,000&thinsp;px masters, and hand-constructing <code>/thumb/</code> URLs is the correct MediaWiki form but Varnish answers <code>400</code>.</p>
+          </div>
+        </li>
+        <li>
+          <div class="stage-n">02</div>
+          <div class="stage-body">
+            <p class="stage-h">Fetch with per-host limits</p>
+            <p class="stage-where">One semaphore per hostname &middot; retry with backoff on 429</p>
+            <p>A single global concurrency limit concentrates every request on one origin. Spreading across roughly 14 CDNs and limiting <em>per host</em> takes the failure rate from 60% to 0.6% while raising total throughput, because six in flight to each of fourteen hosts is forty-eight polite requests, not one rude one.</p>
+            <p>Honour <code>Retry-After</code>, sleep outside the semaphore, and record why each failure happened. A bare <code>except</code> here hides rate limiting as if it were missing data.</p>
+          </div>
+        </li>
+        <li>
+          <div class="stage-n">03</div>
+          <div class="stage-body">
+            <p class="stage-h">Resize once, store twice</p>
+            <p class="stage-where">pyvips &rarr; 384&thinsp;px WebP &rarr; B2/R2 + the embedder</p>
+            <p>One derivative serves both purposes: it is the thumbnail users see <em>and</em> the input the embedding model reads. Storing it means changing embedding models later is a GPU pass over your own bucket rather than re-crawling the internet.</p>
+            <p>Use <code>pyvips</code> with shrink-on-load, not Pillow. Decoding a 4000&thinsp;px JPEG at 1/8 scale directly costs ~750&thinsp;KB of memory instead of ~48&thinsp;MB, which is the difference between 200 concurrent images and an OOM.</p>
+          </div>
+        </li>
+        <li>
+          <div class="stage-n">04</div>
+          <div class="stage-body">
+            <p class="stage-h">Embed on rented GPU, in bulk</p>
+            <p class="stage-where">SigLIP image tower &middot; streamed from the bucket</p>
+            <p>Embedding is never the bottleneck people expect. The image tower benchmarks at 33&thinsp;img/s on four CPU threads and thousands per second on a rented L4. At 10M this is hours of GPU time costing tens of dollars, not a scaling problem.</p>
+            <p>Because stage&nbsp;3 stored the derivatives, this stage never touches an origin server and can be re-run at will.</p>
+          </div>
+        </li>
+        <li>
+          <div class="stage-n">05</div>
+          <div class="stage-body">
+            <p class="stage-h">Serve: model in RAM, index beside it</p>
+            <p class="stage-where">ONNX Runtime + Qdrant, same region</p>
+            <p>The API holds only the text tower; vectors live in Qdrant. Corpus size then costs the API nothing &mdash; going from 12k to 500k changed query time by about 3&thinsp;ms.</p>
+            <p>Return JSON only. Thumbnails go browser&nbsp;&rarr;&nbsp;CDN directly, never proxied through the API, or every image byte funnels through one box.</p>
+          </div>
+        </li>
+      </ol>
+    </section>
+
+
+    <section>
+      <h2>Timeline</h2>
+      <p class="sec-note">Wall clock for a 10M build. The phases decouple, so embedding runs on what crawling has already produced rather than waiting for it.</p>
+      <div class="tablewrap">
+        <table>
+          <caption>10 million images, pipelined</caption>
+          <thead><tr><th>Phase</th><th>Bound by</th><th class="num">Duration</th></tr></thead>
+          <tbody>
+            <tr><td>Crawl + resize &rarr; bucket</td><td>polite request rate, ~240&nbsp;img/s across 20 IPs</td><td class="num">11&ndash;30&nbsp;h</td></tr>
+            <tr><td>Embed from bucket</td><td>~1,000&nbsp;img/s on a rented L4</td><td class="num">4&ndash;6&nbsp;h</td></tr>
+            <tr><td>Upsert to self-hosted Qdrant</td><td>no free-tier ceiling</td><td class="num">1&ndash;2&nbsp;h</td></tr>
+            <tr><td>HNSW index construction</td><td>8&nbsp;vCPU, <code>m=16</code></td><td class="num">6&ndash;12&nbsp;h</td></tr>
+            <tr><td>Thumbnail warming</td><td>&mdash; eliminated by owning the bucket</td><td class="num">0</td></tr>
+            <tr class="total"><td>Pipelined total</td><td>crawling absorbs the rest</td><td class="num">~12&ndash;30&nbsp;h</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="col">
+        <p><strong>Crawling is the only phase you cannot accelerate.</strong> More runners, faster machines and a bigger index box do nothing for it &mdash; it is 10M HTTP round trips against a donated service, and the honest limit is what that service should be asked to give. Per-IP rate is what matters: ~12&nbsp;req/s across 20 addresses is unremarkable; the same volume from one address is not.</p>
+        <p>At 100M this becomes the wall. Phase&nbsp;1 scales linearly to roughly two weeks of continuous crawling, which is the point where bulk dumps and mirrors stop being a nicety and become the architecture. Worth investigating <em>before</em> committing, not after.</p>
+      </div>
+    </section>
+
+    <section>
+      <h2>Cost model</h2>
+      <p class="sec-note">Monthly running cost, self-hosted on bare metal. The one-time column is crawl and embed compute, rented by the hour and destroyed afterwards.</p>
+
+      <div class="tablewrap">
+        <table>
+          <caption>10 million images</caption>
+          <thead>
+            <tr><th>Component</th><th>Choice</th><th class="num">Monthly</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Thumbnails, 220&nbsp;GB</td><td>Backblaze B2, free egress via Cloudflare</td><td class="num">$1.32</td></tr>
+            <tr><td>Vector store + API</td><td>Hetzner CAX31 &mdash; 8&nbsp;vCPU, 16&nbsp;GB ARM</td><td class="num">$13.50</td></tr>
+            <tr><td>CDN</td><td>Cloudflare</td><td class="num">$0</td></tr>
+            <tr><td>Metadata</td><td>Qdrant payload, same box</td><td class="num">$0</td></tr>
+            <tr class="total"><td>Running total</td><td>10M vectors int8 = 7.7&nbsp;GB, fits 16&nbsp;GB</td><td class="num">~$16</td></tr>
+            <tr><td>Crawl + embed</td><td>one-time, rented hourly</td><td class="num">~$10</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="tablewrap">
+        <table>
+          <caption>100 million images</caption>
+          <thead>
+            <tr><th>Component</th><th>Choice</th><th class="num">Monthly</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Thumbnails, 2.2&nbsp;TB</td><td>Backblaze B2</td><td class="num">$13</td></tr>
+            <tr><td>Vector store + API</td><td>Hetzner CAX41 &mdash; 16&nbsp;vCPU, 32&nbsp;GB</td><td class="num">$27</td></tr>
+            <tr><td>Read replicas</td><td>optional, per extra region</td><td class="num">+$13</td></tr>
+            <tr class="total"><td>Running total</td><td>binary quantization required &mdash; see below</td><td class="num">~$45</td></tr>
+            <tr><td>Crawl + embed</td><td>one-time; weeks of wall clock</td><td class="num">~$100</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="col">
+        <p>At 100M, int8 vectors alone are 77&thinsp;GB and no longer fit. Binary quantization drops them to 9.6&thinsp;GB, and the HNSW graph &mdash; 128&nbsp;bytes per point at <code>m=16</code> &mdash; becomes the larger consumer at 12.8&thinsp;GB. Keep full-precision vectors on NVMe and rescore the top candidates.</p>
+        <p><strong>Storage is never the cost.</strong> At both scales the bucket is under a third of the bill; the vector store is the rest.</p>
+      </div>
+    </section>
+
+    <section>
+      <h2>Measured constraints</h2>
+      <p class="sec-note">Every figure below came from running the prototype against live services, not from documentation. They are the numbers to design against.</p>
+
+      <div class="findings">
+        <div class="finding">
+          <div class="num">82.6/s</div>
+          <h4>Qdrant upsert ceiling, free cluster</h4>
+          <p>Dense + BM25 sparse, 512-point batches, versus 111/s dense-only. BM25 costs ~26% overhead, not the 10&times; often assumed. This ceiling &mdash; not runner count &mdash; caps ingest past ~20 parallel workers.</p>
+        </div>
+        <div class="finding">
+          <div class="num">33 img/s</div>
+          <h4>SigLIP image tower, 4 CPU threads</h4>
+          <p>Well above the ~1.75 img/s a crawl worker actually achieves. Embedding is not the bottleneck; fetch concurrency is. Do not buy GPUs to fix a network problem.</p>
+        </div>
+        <div class="finding">
+          <div class="num stop">1.9 img/s</div>
+          <h4>Embedding on a CI runner, per worker</h4>
+          <p>Measured across a live 20-worker build, and immovable: unchanged by doubling fetch concurrency, and the ceiling on the whole pipeline. Against ~1,000&nbsp;img/s on a rented L4, this single line is why the phases must be decoupled.</p>
+        </div>
+        <div class="finding">
+          <div class="num stop">0.29&times;</div>
+          <h4>ONNX Runtime for the <em>image</em> tower</h4>
+          <p>9.8&nbsp;img/s against PyTorch's 33.5 on the same four CPU threads. ONNX wins decisively for the text tower &mdash; on memory, not speed &mdash; and loses badly here. Benchmark per tower; do not generalise.</p>
+        </div>
+        <div class="finding">
+          <div class="num warn">624 &rarr; 293ms</div>
+          <h4>Cold versus warm thumbnail</h4>
+          <p>On-demand resizing means the first viewer of every image waits. Origin dominates the tail: Museums Victoria 2,475&thinsp;ms and the Met 2,237&thinsp;ms against Wikimedia's 661&thinsp;ms. Storing your own thumbnails deletes this row.</p>
+        </div>
+        <div class="finding">
+          <div class="num">60% &rarr; 0.6%</div>
+          <h4>Fetch failures, after per-host limits</h4>
+          <p>Same concurrency, spread across ~14 origin CDNs instead of concentrated on one. The original 60% loss was rate limiting misread as missing images.</p>
+        </div>
+        <div class="finding">
+          <div class="num warn">0.4 req/s</div>
+          <h4>Openverse sustained throughput</h4>
+          <p>Identical authenticated or anonymous; a free API token buys nothing. Anonymous requests are also capped at <code>page_size=20</code>. Excellent for discovery breadth, unusable as a bulk source.</p>
+        </div>
+        <div class="finding">
+          <div class="num">69 img/s</div>
+          <h4>Commons enumeration, 8 shards</h4>
+          <p>500k discoverable in about two hours. <code>extmetadata</code> costs 9&times; but carries the licence, so it is not optional.</p>
+        </div>
+        <div class="finding">
+          <div class="num">325&thinsp;MB</div>
+          <h4>Serving footprint, ONNX versus PyTorch</h4>
+          <p>Down from ~2&thinsp;GB, with identical embeddings. Dropping <code>transformers</code> for <code>tokenizers</code> saves a further 218&thinsp;MB. This is what fits the API inside a 512&thinsp;MB free tier.</p>
+        </div>
+        <div class="finding">
+          <div class="num">300 &rarr; 7ms</div>
+          <h4>Region pinning the API to the index</h4>
+          <p>Same code, same cluster. Cross-region adds a full round trip to every query. Place the API in the vector store's region before optimising anything else.</p>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Traps that fail silently</h2>
+      <p class="sec-note">Each of these passed tests, produced no error, and degraded quality invisibly. They are worth encoding as assertions in the new build.</p>
+
+      <div class="trapstack">
+        <div class="trap">
+          <h4>4-bit quantization destroys SigLIP text embeddings</h4>
+          <p><code>q4f16</code> was 25&times; faster and looked correct on the first two queries. Measured, unrelated queries scored <strong>0.86&ndash;0.97</strong> cosine against each other where the float32 baseline is 0.68&ndash;0.76 &mdash; the embeddings had collapsed, so one image ranked first for everything. int8 is safe at 0.725.</p>
+          <p>Gate on it at load: embed two unrelated strings and reject the backend if they are too similar. Note the threshold must be measured, not guessed &mdash; SigLIP embeddings are uncentered, so a naive <code>&lt;&nbsp;0.6</code> check rejects every <em>working</em> backend.</p>
+        </div>
+        <div class="trap">
+          <h4>Token padding must stay at 64</h4>
+          <p>Most queries are three tokens, so padding to 16 looks like a free 3&times; speedup. Cosine against the pad-64 reference collapses to <strong>0.45&ndash;0.63</strong>: SigLIP's position embeddings depend on the trained padding length.</p>
+        </div>
+        <div class="trap">
+          <h4>Hand-rolled tokenizers need two fixes or search quietly degrades</h4>
+          <p>Swapping <code>transformers</code> for <code>tokenizers</code> saves 218&thinsp;MB but changes behaviour twice: pad with token id <strong>1</strong>, not 0, and apply SigLIP's canonicalization &mdash; lowercase, strip punctuation, collapse whitespace &mdash; before encoding. Without it, <code>"A Steam Locomotive!"</code> tokenizes to something entirely different from <code>"a steam locomotive"</code>.</p>
+        </div>
+        <div class="trap">
+          <h4>MediaWiki continuation cursors are not always URL-safe</h4>
+          <p>Commons holds filenames in decomposed Unicode. Echo one back as a <code>gaicontinue</code> value and the API answers <code>urlparamnormal</code> and the worker dies mid-range &mdash; two of twenty did, about 23 pages in. NFC-normalize every outgoing parameter, and treat the error as recoverable: one unrepresentable cursor should cost a range, not a worker.</p>
+        </div>
+        <div class="trap">
+          <h4>An optimisation that works on one tower can reverse on the other</h4>
+          <p>ONNX Runtime cut the text tower's footprint from ~2&nbsp;GB to 325&nbsp;MB with identical embeddings, so applying it to the image tower looked obvious. It runs at 0.29&times; PyTorch's speed, and the quantized variant that <em>is</em> fast drifts to 0.977 cosine. Measure each one.</p>
+        </div>
+        <div class="trap">
+          <h4>"Commercial use" filters still return no-derivatives licences</h4>
+          <p>Openverse's <code>license_type=commercial</code> includes <strong>ND</strong>, which permits commercial use but forbids the cropping and compositing an editor does constantly. Whitelist <code>cc0,pdm,by,by-sa</code> explicitly, and surface share-alike separately &mdash; it is viral onto derivatives and nobody reads the terms.</p>
+        </div>
+        <div class="trap">
+          <h4>Photographer names do not belong in a lexical index</h4>
+          <p>Including <code>creator</code> in the BM25 text makes a query for "williams" match every photo by Phil Williams, and floods the sparse index with high-cardinality tokens that dilute IDF against real subject terms.</p>
+        </div>
+        <div class="trap">
+          <h4>Markup leaks in through source metadata</h4>
+          <p>Openverse returns microformat HTML in some titles. At 0.5% of a 12,345-image corpus it is cosmetic; at 10M it is 50,000 records feeding <code>div</code>, <code>class</code> and <code>style</code> into the search index. Strip tags at ingest, not at render.</p>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Retrieval</h2>
+      <div class="col">
+        <p>Dense vectors alone cannot distinguish proper nouns. Searching <em>Herstmonceux Castle</em> against a SigLIP-only index returns Leeds Castle and Broncroft Castle first, because the model understands "castle" perfectly and the name not at all.</p>
+        <p>Fusing a BM25 sparse vector over title, description and tags with reciprocal-rank fusion puts the correct castle first, at a cost of roughly 60&thinsp;ms. Keep both prefetches filtered identically and preserve quantization rescoring on the dense branch.</p>
+        <p>One caveat worth planning around: BM25's value depends on metadata quality, and enumeration produces thin metadata. Search-sourced records carry real tags; enumerated ones often carry a filename like <code>Ph-1.jpg</code>. Expect hybrid to help less as enumeration comes to dominate the corpus, and consider a VLM captioning pass over whatever your query logs show people actually look at.</p>
+      </div>
+    </section>
+
+    <section>
+      <h2>Open risks</h2>
+      <p class="sec-note">Unresolved at the end of the prototype. Each needs a decision before or during the real build.</p>
+      <ul class="risks">
+        <li>
+          <span class="lbl">Legal</span>
+          <div>
+            <b>Trademark and publicity rights are separate from copyright</b>
+            <p>A commercially-licensed photograph of a branded object is still not commercially usable. CC-licensed photographs of people almost never carry model releases. The licence filter answers a narrower question than users assume it does.</p>
+          </div>
+        </li>
+        <li>
+          <span class="lbl">Coverage</span>
+          <div>
+            <b>The categories professionals want most are the ones free sources have least</b>
+            <p>Measured on the prototype: transparent cutouts and clean product shots scored near noise, roughly 0.04 against 0.15 for well-covered subjects. If those queries matter, background removal becomes a core feature rather than a nicety.</p>
+          </div>
+        </li>
+        <li>
+          <span class="lbl">Quality</span>
+          <div>
+            <b>Enumeration trades relevance for volume</b>
+            <p>Walking the namespace returns everything, including 365 consecutive scans of one manuscript. Deduplication and a quality filter matter far more at 10M than at 12k.</p>
+          </div>
+        </li>
+        <li>
+          <span class="lbl">Provenance</span>
+          <div>
+            <b>Licence metadata must be stored as fetched, with a timestamp</b>
+            <p>Upstream sources contain mislabelled files, and serving an all-rights-reserved image as CC0 is direct liability rather than the uploader's. Recording the source URL, the exact licence string and the fetch time is a schema decision &mdash; cheap now, a migration over 10M rows later.</p>
+          </div>
+        </li>
+        <li>
+          <span class="lbl">Ingest</span>
+          <div>
+            <b>Crawling 10M originals is weeks, not hours</b>
+            <p>Bandwidth is free; politeness is not. Distributed IPs move the throttling offline where users never see it, but the wall clock is real and should be budgeted alongside compute.</p>
+          </div>
+        </li>
+      </ul>
+    </section>
+
+  </main>
+
+  <footer>
+    <p>Figures measured against live Wikimedia Commons, Openverse, Qdrant Cloud, Render and Backblaze between the prototype's first 2,071 images and its 500k build. Costs are list prices at time of writing and should be re-checked before committing.</p>
+  </footer>
+</div>
