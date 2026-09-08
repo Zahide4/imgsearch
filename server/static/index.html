@@ -211,14 +211,23 @@ function render(){
       const r = results[i], stage = img.dataset.stage;
       if (stage === '0') {
         img.dataset.stage = '1';
-        setTimeout(() => { img.src = r.thumb + '&_r=1'; }, 700);
+        setTimeout(() => { img.src = r.thumb + '&_r=1'; }, 400);
       } else if (stage === '1' && originOf(r.thumb)) {
         // NOT r.full_url -- that is the Flickr/Wikimedia landing PAGE and
         // returns text/html (verified: magic bytes 3c21444f = "<!DO").
         // Setting it as img.src swaps a broken image for a 500KB HTML doc.
         // The real image URL is the one we handed the proxy.
+        // The origin is full resolution -- measured avg 1,142 KB against a
+        // 22 KB proxied thumbnail. Six of those on a page turns ~1.3 MB of
+        // thumbnails into ~8 MB and visibly slows the whole grid, because
+        // they compete for bandwidth AND cost a full-size JPEG decode.
+        // So recover them, but never at the expense of the images that
+        // already work: lowest priority, and skipped entirely while
+        // off-screen. The grid paints at full speed; these trickle in.
         img.dataset.stage = '2';
-        img.src = originOf(r.thumb);            // full size, but it renders
+        img.loading = 'lazy';
+        img.fetchPriority = 'low';
+        img.src = originOf(r.thumb);
       } else {
         c.style.opacity = '.45';
         c.title = 'Thumbnail unavailable (image proxy was rate-limited)';
