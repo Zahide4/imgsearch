@@ -5,90 +5,138 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>imgsearch</title>
 <link rel="preconnect" href="https://wsrv.nl" crossorigin>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
 <style>
+  /* Deliberately single-theme: a black instrument panel, not a document.
+     Every colour is painted explicitly so the page holds on any host ground. */
   :root{
-    --bg:#0d0d10; --panel:#17171c; --panel2:#1e1e25; --line:#2a2a33;
-    --fg:#eceef2; --muted:#8b8f9a; --accent:#5b8dff; --ok:#3ec98a; --warn:#e8b84b;
+    --bg:#000000;
+    --sunk:#060606;
+    --surface:#0B0B0B;
+    --raise:#141414;
+    --hair:#1A1A1A;
+    --hair-2:#262626;
+    --fg:#F2F2F2;
+    --fg-2:#A6A6A6;
+    --muted:#6E6E6E;
+    --dim:#454545;
+    --sa:#8C7C5A;          /* share-alike: the only tint on the page */
+    --ok:#8FA88F;
+    --sp:clamp(1rem,2.6vw,1.75rem);
   }
   *{box-sizing:border-box}
-  body{margin:0;background:var(--bg);color:var(--fg);
-       font:14px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;}
-  .wrap{max-width:1400px;margin:0 auto;padding:28px 20px 80px}
+  html,body{height:100%}
+  body{
+    margin:0;background:var(--bg);color:var(--fg);
+    font-family:"Instrument Sans",system-ui,-apple-system,sans-serif;
+    font-size:14px;line-height:1.5;letter-spacing:-.005em;
+    -webkit-font-smoothing:antialiased;
+  }
+  .mono{font-family:"JetBrains Mono",ui-monospace,monospace;font-variant-numeric:tabular-nums}
+  .wrap{max-width:1680px;margin:0 auto;padding:0 var(--sp) 6rem}
 
-  .bar{position:sticky;top:0;z-index:20;background:linear-gradient(var(--bg) 78%,transparent);
-       padding:12px 0 18px}
-  .searchbox{display:flex;align-items:center;gap:14px;background:var(--panel);
-       border:1px solid var(--line);border-radius:14px;padding:0 18px;
-       box-shadow:0 12px 40px rgba(0,0,0,.5)}
-  .searchbox:focus-within{border-color:var(--accent)}
-  .searchbox svg{flex:none;opacity:.45}
+  /* ---------- search bar ---------- */
+  .bar{position:sticky;top:0;z-index:20;background:var(--bg);
+       padding:1.4rem 0 0;border-bottom:1px solid var(--hair)}
+  .searchbox{display:flex;align-items:center;gap:.9rem;padding:0 0 1.1rem}
+  .searchbox svg{flex:none;color:var(--dim);transition:color .15s}
+  .searchbox:focus-within svg{color:var(--fg-2)}
   #q{flex:1;background:none;border:0;outline:0;color:var(--fg);
-     font-size:21px;padding:17px 0;font-weight:420}
-  #q::placeholder{color:#5b5f6b}
-  .lat{font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;flex:none}
-  .lat b{color:var(--ok);font-weight:600}
+     font-family:inherit;font-size:1.55rem;font-weight:400;letter-spacing:-.02em;
+     padding:0;min-width:0}
+  #q::placeholder{color:var(--dim)}
+  .lat{flex:none;font-family:"JetBrains Mono",ui-monospace,monospace;
+       font-variant-numeric:tabular-nums;font-size:.68rem;color:var(--muted);
+       letter-spacing:.02em}
+  .lat b{color:var(--fg-2);font-weight:500}
 
-  .meta{display:flex;gap:16px;align-items:center;margin-top:11px;
-        font-size:12px;color:var(--muted);flex-wrap:wrap}
-  .meta label{display:flex;gap:6px;align-items:center;cursor:pointer;user-select:none}
-  .chip{background:var(--panel2);border:1px solid var(--line);border-radius:20px;
-        padding:4px 11px;cursor:pointer;color:var(--muted)}
-  .chip:hover{color:var(--fg);border-color:#3a3a45}
+  .meta{display:flex;align-items:center;gap:1.6rem;flex-wrap:wrap;
+        padding:0 0 1rem;font-family:"JetBrains Mono",ui-monospace,monospace;
+        font-size:.7rem;letter-spacing:.07em;text-transform:uppercase;color:var(--muted)}
+  .meta label{display:flex;align-items:center;gap:.5rem;cursor:pointer;user-select:none;
+              color:var(--muted);transition:color .15s}
+  .meta label:hover{color:var(--fg-2)}
+  .meta input[type=checkbox]{appearance:none;width:11px;height:11px;border:1px solid var(--hair-2);
+      background:var(--sunk);cursor:pointer;position:relative;flex:none;border-radius:1px}
+  .meta input[type=checkbox]:checked{background:var(--fg-2);border-color:var(--fg-2)}
+  .meta .spacer{flex:1}
+  kbd{font-family:"JetBrains Mono",ui-monospace,monospace;font-size:.62rem;
+      color:var(--dim);border:1px solid var(--hair-2);border-radius:2px;
+      padding:.1em .34em;margin-right:.12em}
 
-  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:12px}
-  .card{position:relative;background:var(--panel);border:1px solid var(--line);
-        border-radius:11px;overflow:hidden;cursor:grab;aspect-ratio:1;
-        transition:transform .09s ease,border-color .09s ease}
-  .card:hover{transform:translateY(-2px);border-color:#454552}
-  .card.sel{border-color:var(--accent);box-shadow:0 0 0 2px rgba(91,141,255,.3)}
-  .card img{width:100%;height:100%;object-fit:cover;display:block;
-      opacity:0;transition:opacity .18s ease;
-
-            background:var(--panel2)}
-  .card img.ready{opacity:1}
+  /* ---------- grid ---------- */
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(178px,1fr));
+        gap:2px;padding-top:2px}
+  .card{position:relative;background:var(--sunk);overflow:hidden;cursor:grab;
+        aspect-ratio:1;transition:opacity .15s}
   .card::after{content:'';position:absolute;inset:0;pointer-events:none;
-      background:linear-gradient(100deg,transparent 20%,rgba(255,255,255,.045) 40%,transparent 60%);
-      background-size:220% 100%;animation:sk 1.4s ease-in-out infinite;opacity:1;transition:opacity .2s}
-  .card.done::after{opacity:0;animation:none}
-  @keyframes sk{0%{background-position:130% 0}100%{background-position:-30% 0}}
-  .card.busy::before{content:'';position:absolute;z-index:3;inset:0;
-      background:rgba(0,0,0,.55);backdrop-filter:blur(1px)}
-  .card .prog{position:absolute;z-index:4;inset:0;display:none;
-      align-items:center;justify-content:center;flex-direction:column;gap:8px;
-      font-size:11px;color:var(--fg);letter-spacing:.02em}
-  .card.busy .prog,.card.copied .prog{display:flex}
-  .card .ring{width:30px;height:30px;border-radius:50%;
-      border:2.5px solid rgba(255,255,255,.18);border-top-color:var(--accent);
-      animation:spin .7s linear infinite}
-  .card.copied::before{content:'';position:absolute;z-index:3;inset:0;
-      background:rgba(11,40,25,.62)}
-  .card.copied .ring{animation:none;border:none;width:auto;height:auto;
-      font-size:22px;color:var(--ok)}
-  @keyframes spin{to{transform:rotate(360deg)}}
-  .card .info{position:absolute;inset:auto 0 0 0;padding:22px 10px 8px;
-      background:linear-gradient(transparent,rgba(0,0,0,.93));
-      opacity:0;transition:opacity .12s}
-  .card:hover .info,.card.sel .info{opacity:1}
-  .card .t{font-size:11px;line-height:1.35;max-height:2.7em;overflow:hidden;
-           margin-bottom:4px}
-  .card .l{font-size:10px;color:var(--ok);font-weight:600;letter-spacing:.02em}
-  .card .l.sa{color:var(--warn)}
-  .card .dim{position:absolute;top:7px;right:8px;font-size:10px;
-      background:rgba(0,0,0,.7);padding:2px 6px;border-radius:5px;
-      color:var(--muted);opacity:0;transition:opacity .12s}
+        box-shadow:inset 0 0 0 1px var(--hair);transition:box-shadow .15s}
+  .card:hover::after{box-shadow:inset 0 0 0 1px var(--hair-2)}
+  .card.sel::after{box-shadow:inset 0 0 0 1px var(--fg-2)}
+  .card img{width:100%;height:100%;object-fit:cover;display:block;
+        opacity:0;transition:opacity .22s ease}
+  /* Full brightness always. A dimmed grid looks cohesive and misrepresents
+     the image, which is the one thing this tool must not do. Hover feedback
+     comes from the hairline instead. */
+  .card img.ready{opacity:1}
+
+  .card .dim{position:absolute;top:0;right:0;z-index:2;
+      font-family:"JetBrains Mono",ui-monospace,monospace;font-size:.6rem;
+      letter-spacing:.04em;color:var(--fg-2);background:rgba(0,0,0,.72);
+      padding:.28em .5em;opacity:0;transition:opacity .15s}
   .card:hover .dim{opacity:1}
 
-  .empty{text-align:center;padding:90px 20px;color:var(--muted)}
-  .empty h2{color:var(--fg);font-weight:500;font-size:17px;margin:0 0 8px}
-  .empty code{background:var(--panel2);padding:2px 7px;border-radius:5px;
-              font-size:12px;color:var(--accent)}
-  .toast{position:fixed;bottom:26px;left:50%;transform:translateX(-50%) translateY(70px);
-     background:var(--panel2);border:1px solid var(--line);padding:11px 20px;
-     border-radius:11px;transition:transform .22s cubic-bezier(.2,.9,.3,1.2);
-     box-shadow:0 10px 30px rgba(0,0,0,.6);font-size:13px;z-index:50}
+  .card .info{position:absolute;z-index:2;inset:auto 0 0 0;padding:1.8rem .6rem .55rem;
+      background:linear-gradient(transparent,rgba(0,0,0,.9) 55%);
+      opacity:0;transition:opacity .15s}
+  .card:hover .info,.card.sel .info{opacity:1}
+  .card .t{font-size:.72rem;line-height:1.35;color:var(--fg);
+      max-height:2.7em;overflow:hidden;margin-bottom:.22em}
+  .card .l{font-family:"JetBrains Mono",ui-monospace,monospace;font-size:.6rem;
+      letter-spacing:.05em;text-transform:uppercase;color:var(--muted)}
+  .card .l.sa{color:var(--sa)}
+
+  /* skeleton while the bytes are still in flight */
+  .card::before{content:'';position:absolute;inset:0;z-index:1;pointer-events:none;
+      background:linear-gradient(100deg,transparent 22%,rgba(255,255,255,.028) 42%,transparent 62%);
+      background-size:230% 100%;animation:sk 1.5s ease-in-out infinite;transition:opacity .2s}
+  .card.done::before{opacity:0;animation:none}
+  @keyframes sk{0%{background-position:135% 0}100%{background-position:-35% 0}}
+
+  /* copy progress */
+  .card.busy .info,.card.copied .info{opacity:0}
+  .card .prog{position:absolute;z-index:4;inset:0;display:none;
+      align-items:center;justify-content:center;flex-direction:column;gap:.6rem;
+      background:rgba(0,0,0,.72);
+      font-family:"JetBrains Mono",ui-monospace,monospace;font-size:.62rem;
+      letter-spacing:.08em;text-transform:uppercase;color:var(--fg-2)}
+  .card.busy .prog,.card.copied .prog{display:flex}
+  .card .ring{width:22px;height:22px;border-radius:50%;
+      border:1.5px solid var(--hair-2);border-top-color:var(--fg-2);
+      animation:spin .8s linear infinite}
+  .card.copied .ring{animation:none;border:none;width:auto;height:auto;
+      font-size:1rem;color:var(--ok)}
+  @keyframes spin{to{transform:rotate(360deg)}}
+
+  /* ---------- states ---------- */
+  .empty{padding:7rem var(--sp);text-align:center;color:var(--muted)}
+  .empty h2{margin:0 0 .5rem;font-size:1rem;font-weight:500;color:var(--fg-2);
+      letter-spacing:-.01em}
+  .empty p{margin:0;font-size:.82rem;max-width:44ch;margin-inline:auto;line-height:1.6}
+  .empty code{font-family:"JetBrains Mono",ui-monospace,monospace;font-size:.76rem;
+      color:var(--fg-2);background:var(--raise);padding:.14em .4em}
+
+  .toast{position:fixed;z-index:60;bottom:1.6rem;left:50%;
+      transform:translateX(-50%) translateY(3.2rem);
+      background:var(--raise);color:var(--fg-2);border:1px solid var(--hair-2);
+      padding:.7rem 1.1rem;font-family:"JetBrains Mono",ui-monospace,monospace;
+      font-size:.68rem;letter-spacing:.03em;max-width:min(90vw,44rem);
+      transition:transform .24s cubic-bezier(.2,.9,.3,1.1)}
   .toast.on{transform:translateX(-50%) translateY(0)}
-  kbd{background:var(--panel2);border:1px solid var(--line);border-bottom-width:2px;
-      border-radius:5px;padding:1px 6px;font:11px ui-monospace,monospace}
+
+  :focus-visible{outline:1px solid var(--fg-2);outline-offset:2px}
+  @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style>
 </head>
 <body>
@@ -106,11 +154,10 @@
     <div class="meta">
       <span id="corpus">&mdash;</span>
       <label><input type="checkbox" id="commercial" checked> hide share-alike (CC BY-SA)</label>
-      <span style="flex:1"></span>
+      <span class="spacer"></span>
       <span><kbd>&larr;</kbd><kbd>&rarr;</kbd> move &nbsp;
             <kbd>&crarr;</kbd> copy &nbsp; drag to Photoshop/Premiere</span>
     </div>
-    <div class="meta" id="examples"></div>
   </div>
 
   <div id="out"></div>
@@ -128,12 +175,6 @@ let warmCtl = null;
 const originOf = t => { try { return new URL(t, location.href).searchParams.get('url') || ''; }
                         catch (e) { return ''; } };
 
-const EXAMPLES = ["v12 engine cutaway","human heart anatomy","brushed metal texture",
-  "misty forest at dawn","vintage typewriter","art deco poster","circuit board macro",
-  "storm clouds over desert","medieval castle ruins","microscope diatoms"];
-
-$('#examples').innerHTML = EXAMPLES.map(e =>
-  `<span class="chip" onclick="go('${e}')">${e}</span>`).join('');
 
 function toast(msg){
   const t = $('#toast'); t.textContent = msg; t.classList.add('on');
