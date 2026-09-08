@@ -35,6 +35,25 @@ COLLECTION = os.getenv('QDRANT_COLLECTION', 'images-v2')
 UA = {'User-Agent': os.getenv('CRAWL_UA', 'ImgSearch/0.2 (+https://github.com/Zahide4/imgsearch)')}
 
 
+def thumb_url(payload) -> str:
+    """Resolve a thumbnail exactly the way the API does.
+
+    Records carry EITHER a prebuilt `cdn` URL or a raw `thumb_origin` that the
+    API wraps in the proxy at query time. Reading only `cdn` silently skips
+    every record produced by cloud_corpus.py -- 400 of 12,345 today, and all
+    of them at 500k, which would have made this script a no-op exactly when
+    it matters most.
+    """
+    cdn = payload.get('cdn')
+    if cdn:
+        return cdn
+    origin = payload.get('thumb_origin') or ''
+    if not origin:
+        return ''
+    return ('https://wsrv.nl/?url=' + urllib.parse.quote(origin, safe='')
+            + '&w=384&h=384&fit=inside&output=webp&q=80&maxage=1y')
+
+
 def host_of(url: str) -> str:
     try:
         q = urllib.parse.parse_qs(urllib.parse.urlparse(url).query).get('url', [''])[0]
@@ -75,7 +94,7 @@ async def main():
                                  with_payload=True, with_vectors=False)
         if not recs:
             break
-        urls += [r.payload.get('cdn') for r in recs if r.payload.get('cdn')]
+        urls += [u for u in (thumb_url(r.payload or {}) for r in recs) if u]
         if offset is None or (args.limit and len(urls) >= args.limit):
             break
     if args.limit:
