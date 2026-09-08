@@ -40,7 +40,15 @@
   --good:#7FCF9A;
 
   --r-sm:6px; --r-md:10px; --r-lg:14px;
-  --ease:cubic-bezier(.32,.72,0,1);   /* Apple's standard curve */
+  --ease:cubic-bezier(.32,.72,0,1);   /* Apple's standard curve, no overshoot */
+  /* Real springs. Apple's motion overshoots slightly and settles; a plain
+     ease-out arrives and stops dead, which is what read as lifeless. */
+  --spring:linear(0,.0088,.0344 2.3%,.1367 4.9%,.4809 10.4%,.6883 13.7%,.8547 17%,
+    .9769 20.4%,1.0603 23.9%,1.1074 27.5%,1.1244 31.4%,1.1173 35.6%,1.0932 40.2%,
+    1.0603 45.5%,1.0263 51.7%,.9982 59.3%,.9838 69.1%,.9862 84.3%,1);
+  --spring-soft:linear(0,.0121,.0472 2.6%,.1799 5.5%,.5798 11%,.7969 14.6%,
+    .9385 18.2%,1.0231 21.9%,1.0611 25.9%,1.0665 30.3%,1.0498 35.5%,
+    1.0242 42%,.9985 51.6%,.9931 62.4%,1.0003 84.8%,1);
   --gutter:clamp(var(--s5), 4vw, var(--s8));
 }
 
@@ -57,12 +65,10 @@ body{
 
 /* ---------- header ---------- */
 .bar{position:sticky;top:0;z-index:20;background:var(--bg);padding:0}
-.bar::after{content:'';position:absolute;left:0;right:0;bottom:0;height:1px;
-  background:var(--sep);opacity:0;transition:opacity .25s var(--ease)}
-body.searching .bar::after{opacity:1}
+
 
 .hero{overflow:hidden;max-height:320px;
-  transition:max-height .55s var(--ease),opacity .3s var(--ease)}
+  transition:max-height .62s var(--spring-soft),opacity .34s var(--ease)}
 body.searching .hero{max-height:0;opacity:0}
 .hero-inner{padding:var(--s9) 0 var(--s7)}
 
@@ -70,7 +76,7 @@ body.searching .hero{max-height:0;opacity:0}
   font-size:clamp(56px,9vw,104px);font-weight:600;line-height:1;
   letter-spacing:-.045em;color:var(--label);
   font-variant-numeric:tabular-nums;font-feature-settings:"tnum";
-  animation:rise .6s var(--ease) both}
+  animation:rise .62s var(--spring-soft) both}
 .odo-col{display:block;height:1em;overflow:hidden;position:relative}
 .odo-strip{display:block;will-change:transform;transition:transform 1s var(--ease)}
 .odo-strip i{display:flex;align-items:center;justify-content:center;
@@ -78,7 +84,7 @@ body.searching .hero{max-height:0;opacity:0}
 .odo-sep{display:block}
 .count-sub{margin:var(--s4) 0 0;font-size:var(--t3);font-weight:400;
   color:var(--label-2);letter-spacing:0;
-  animation:rise .6s var(--ease) .06s both}
+  animation:rise .62s var(--spring-soft) .07s both}
 
 /* ---------- field ---------- */
 .searchbox{display:flex;align-items:center;gap:var(--s4);
@@ -90,10 +96,10 @@ body.searching .hero{max-height:0;opacity:0}
              inset 0 0 0 1px rgba(255,255,255,.12),
              inset 0 -1px 0 rgba(255,255,255,.05),
              0 10px 34px rgba(0,0,0,.55);
-  transition:box-shadow .3s var(--ease),transform .3s var(--ease),
-             background .3s var(--ease);
-  animation:rise .6s var(--ease) .12s both}
-.searchbox:hover{transform:translateY(-1px);
+  transition:box-shadow .38s var(--ease),transform .5s var(--spring),
+             background .38s var(--ease);
+  animation:rise .68s var(--spring) .14s both}
+.searchbox:hover{transform:translateY(-2px) scale(1.006);
   box-shadow:inset 0 1px 0 rgba(255,255,255,.2),
              inset 0 0 0 1px rgba(255,255,255,.11),
              0 14px 40px rgba(0,0,0,.6)}
@@ -115,7 +121,7 @@ body.searching .hero{max-height:0;opacity:0}
 .meta{display:flex;align-items:center;justify-content:center;gap:var(--s5);
   flex-wrap:wrap;min-height:22px;margin:0 auto var(--s5);
   font-size:var(--t2);color:var(--label-2);
-  animation:rise .6s var(--ease) .18s both}
+  animation:rise .62s var(--spring-soft) .22s both}
 .meta label{display:inline-flex;align-items:center;gap:var(--s2);
   cursor:pointer;user-select:none;transition:color .2s var(--ease)}
 .meta label:hover{color:var(--label)}
@@ -134,13 +140,13 @@ body.searching .hero{max-height:0;opacity:0}
   grid-template-columns:repeat(auto-fill,minmax(200px,1fr))}
 .card{position:relative;aspect-ratio:1;overflow:hidden;cursor:grab;
   background:var(--elev-1);border-radius:var(--r-md);
-  animation:cardIn .45s var(--ease) both;
-  animation-delay:calc(min(var(--i,0),11) * 26ms);
-  transition:transform .28s var(--ease)}
+  animation:cardIn .58s var(--spring) both;
+  animation-delay:calc(min(var(--i,0),11) * 28ms);
+  transition:transform .42s var(--spring-soft)}
 .card::after{content:'';position:absolute;inset:0;pointer-events:none;
   border-radius:inherit;box-shadow:inset 0 0 0 1px rgba(255,255,255,.07);
   transition:box-shadow .22s var(--ease)}
-.card:hover{transform:translateY(-2px)}
+.card:hover{transform:translateY(-4px) scale(1.018)}
 .card:hover::after{box-shadow:inset 0 0 0 1px rgba(255,255,255,.16)}
 .card.sel::after{box-shadow:inset 0 0 0 2px var(--label)}
 .card img{width:100%;height:100%;object-fit:cover;display:block;
@@ -224,11 +230,19 @@ body.searching .hero{max-height:0;opacity:0}
 
 .stage{display:flex;flex-direction:column;align-items:center;justify-content:center;
   min-height:82vh;padding:var(--s8) 0 var(--s7);text-align:center;
-  transition:min-height .6s var(--ease),padding .6s var(--ease)}
+  transition:min-height .68s var(--spring-soft),padding .68s var(--spring-soft)}
 body.searching .stage{min-height:0;padding:var(--s4) 0 var(--s2)}
 
 .bar{position:sticky;top:0;z-index:20;background:transparent;padding:0}
-body.searching .bar{background:rgba(0,0,0,.72);backdrop-filter:saturate(180%) blur(24px)}
+/* A flat panel ends on a hard horizontal edge, which is the black bar. Mask
+   the whole layer -- background AND backdrop blur -- so it dissolves into the
+   grid instead of stopping. */
+body.searching .bar{
+  background:linear-gradient(180deg,rgba(0,0,0,.92),rgba(0,0,0,.72) 58%,rgba(0,0,0,0));
+  backdrop-filter:saturate(160%) blur(20px);
+  -webkit-mask-image:linear-gradient(180deg,#000 62%,rgba(0,0,0,.55) 84%,transparent);
+  mask-image:linear-gradient(180deg,#000 62%,rgba(0,0,0,.55) 84%,transparent);
+  padding-bottom:var(--s5)}
 
 .hero-inner{padding:0 0 var(--s7);transition:padding .6s var(--ease)}
 .count{justify-content:center}
@@ -257,7 +271,7 @@ body.working .searchbox .track{opacity:.9;animation:sweep 1.15s var(--ease) infi
 .switch .knobtrack::after{content:'';position:absolute;top:2px;left:2px;
   width:19px;height:19px;border-radius:50%;background:#fff;
   box-shadow:0 1px 3px rgba(0,0,0,.5);
-  transition:transform .28s var(--ease)}
+  transition:transform .46s var(--spring)}
 .switch input:checked + .knobtrack{background:var(--good)}
 .switch input:checked + .knobtrack::after{transform:translateX(15px)}
 .switch input:focus-visible + .knobtrack{outline:2px solid var(--label);outline-offset:3px}
@@ -265,8 +279,8 @@ body.working .searchbox .track{opacity:.9;animation:sweep 1.15s var(--ease) infi
 /* results reveal */
 #out{position:relative;z-index:1}
 
-@keyframes rise{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
-@keyframes cardIn{from{opacity:0;transform:translateY(8px) scale(.99)}to{opacity:1;transform:none}}
+@keyframes rise{from{opacity:0;transform:translateY(18px) scale(.985)}to{opacity:1;transform:none}}
+@keyframes cardIn{from{opacity:0;transform:translateY(14px) scale(.94)}to{opacity:1;transform:none}}
 @keyframes sk{0%{background-position:130% 0}100%{background-position:-30% 0}}
 @keyframes spin{to{transform:rotate(360deg)}}
 
