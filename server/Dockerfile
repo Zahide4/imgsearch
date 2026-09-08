@@ -14,5 +14,5 @@ RUN python -c "from huggingface_hub import hf_hub_download as d; \
     d('Xenova/siglip-base-patch16-224','tokenizer.json')"
 
 COPY . .
-ENV ORT_THREADS=2 PORT=8000
+ENV ORT_THREADS=1 PORT=8000
 CMD uvicorn app:app --host 0.0.0.0 --port ${PORT:-8000}

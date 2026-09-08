@@ -1,3 +1,14 @@
+# Current deployment
+
+The active app is `server/` on Render, backed by Qdrant Cloud.
+Use `.github/workflows/cloud-corpus.yml` to crawl, embed, archive and index on
+cloud workers; no image corpus is stored on your Mac. See [DEPLOY.md](DEPLOY.md)
+for the current workflow, validation and capacity limits. The notes below
+describe the earlier local prototype and experiments; their capacity and
+throughput estimates are historical, not guarantees.
+
+---
+
 # imgsearch-proto
 
 Small-scale, zero-cost prototype of the universal image search app.

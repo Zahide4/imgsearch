@@ -1,0 +1,49 @@
+name: Build searchable cloud corpus
+on:
+  workflow_dispatch:
+    inputs:
+      target_per_worker:
+        description: Images to add per worker (four workers)
+        default: '100'
+        required: true
+      build:
+        description: Build identifier; reuse to resume
+        default: pilot-v1
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: cloud-corpus
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        worker: [0, 1, 2, 3]
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      HF_REPO: ${{ secrets.HF_REPO }}
+      QDRANT_URL: ${{ secrets.QDRANT_URL }}
+      QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+      CRAWL_UA: ImgSearch/0.2 (https://github.com/Zahide4/imgsearch)
+      PYTHONUNBUFFERED: '1'
+      TOKENIZERS_PARALLELISM: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install CPU embedding runtime
+        run: |
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          pip install open_clip_torch==3.3.0 httpx Pillow numpy sentencepiece protobuf transformers huggingface_hub qdrant-client
+      - name: Crawl, embed, archive, and index
+        env:
+          TARGET: ${{ inputs.target_per_worker }}
+          BUILD: ${{ inputs.build }}
+          WORKER: ${{ matrix.worker }}
+        run: python cloud_corpus.py --worker "$WORKER" --workers 4 --target "$TARGET" --build "$BUILD"

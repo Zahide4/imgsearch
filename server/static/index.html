@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>imgsearch</title>
+<link rel="preconnect" href="https://wsrv.nl" crossorigin>
 <style>
   :root{
     --bg:#0d0d10; --panel:#17171c; --panel2:#1e1e25; --line:#2a2a33;
@@ -97,7 +98,7 @@
 <script>
 const $  = s => document.querySelector(s);
 const qEl = $('#q'), outEl = $('#out'), latEl = $('#lat');
-let results = [], sel = -1, ctrl = null, timer = null;
+let results = [], sel = -1, ctrl = null, timer = null, generation = 0;
 
 const EXAMPLES = ["v12 engine cutaway","human heart anatomy","brushed metal texture",
   "misty forest at dawn","vintage typewriter","art deco poster","circuit board macro",
@@ -118,45 +119,56 @@ fetch('/api/stats').then(r=>r.json()).then(d=>{
     : 'empty index';
   if(!d.total) outEl.innerHTML = `<div class="empty">
     <h2>No index yet</h2>
-    <p>Run <code>python ingest.py --per-topic 60</code> and refresh.</p></div>`;
+    <p>The image index is being prepared. Please try again shortly.</p></div>`;
 });
 
-// Debounce tuned to the BACKEND, not to feel snappy in isolation.
-// At 60ms nearly every keystroke fired a request: typing "glass bottle"
-// sent 12, which serialised on a 0.1-CPU free instance and made the last
-// one report 5600ms -- it was reporting everyone else's queue wait.
-// A single query is ~740ms, so the debounce has to exceed typing cadence.
 const DEBOUNCE_MS = 320, MIN_CHARS = 2;
-const rcache = new Map();          // query -> results, makes backspacing free
-
-qEl.addEventListener('input', () => {
-  clearTimeout(timer);
-  const v = qEl.value.trim();
-  if (rcache.has(v)) { results = rcache.get(v); sel = -1; render();
-                       latEl.innerHTML = '<b>0ms</b> &nbsp;cached'; return; }
-  timer = setTimeout(run, DEBOUNCE_MS);
-});
-
-async function run(){
-  const q = qEl.value.trim();
-  if(!q){ outEl.innerHTML=''; latEl.textContent=''; results=[]; return; }
-  if(q.length < MIN_CHARS) return;
-  if(rcache.has(q)){ results=rcache.get(q); sel=-1; render();
-                     latEl.innerHTML='<b>0ms</b> &nbsp;cached'; return; }
+const rcache = new Map();
+const cacheKey = q => JSON.stringify([q, $('#commercial').checked]);
+function cancelSearch(){
+  clearTimeout(timer); generation++;
   if(ctrl) ctrl.abort();
-  ctrl = new AbortController();
-  latEl.innerHTML = '<span style="opacity:.6">searching…</span>';
-  const t0 = performance.now();
+  ctrl = null;
+}
+function cached(q){
+  const item = rcache.get(cacheKey(q));
+  if(!item || Date.now()-item.at > 120000) return false;
+  results=item.results; sel=-1; render();
+  latEl.innerHTML='<b>0ms</b> &nbsp;cached'; return true;
+}
+qEl.addEventListener('input', () => {
+  cancelSearch();
+  const q=qEl.value.trim();
+  if(q.length < MIN_CHARS){ results=[]; sel=-1; outEl.innerHTML=''; latEl.textContent=''; return; }
+  if(cached(q)) return;
+  latEl.textContent='searching…';
+  timer=setTimeout(run, DEBOUNCE_MS);
+});
+async function run(){
+  cancelSearch();
+  const current=generation, q=qEl.value.trim(), key=cacheKey(q);
+  if(q.length < MIN_CHARS){ results=[]; sel=-1; outEl.innerHTML=''; latEl.textContent=''; return; }
+  if(cached(q)) return;
+  ctrl=new AbortController();
+  latEl.textContent='searching…';
+  const t0=performance.now();
   try{
-    const r = await fetch(`/api/search?q=${encodeURIComponent(q)}&limit=60`
-      + ($('#commercial').checked ? '&license_class=public_domain,attribution' : ''), {signal: ctrl.signal});
-    const d = await r.json();
-    const rt = Math.round(performance.now() - t0);
-    latEl.innerHTML = `<b>${rt}ms</b> &nbsp;server ${d.ms}ms`;
-    results = d.results; rcache.set(q, d.results);
-    if(rcache.size > 300) rcache.delete(rcache.keys().next().value);
-    sel = -1; render();
-  }catch(e){ if(e.name !== 'AbortError') console.error(e); }
+    const r=await fetch(`/api/search?q=${encodeURIComponent(q)}&limit=60`
+      + ($('#commercial').checked ? '&license_class=public_domain,attribution' : ''), {signal:ctrl.signal});
+    if(!r.ok) throw new Error('Search unavailable. Please try again.');
+    const d=await r.json();
+    if(current !== generation) return;
+    if(!Array.isArray(d.results)) throw new Error('Invalid search response');
+    results=d.results; sel=-1;
+    rcache.set(key,{at:Date.now(),results});
+    if(rcache.size>150) rcache.delete(rcache.keys().next().value);
+    latEl.innerHTML=`<b>${Math.round(performance.now()-t0)}ms</b> &nbsp;server ${d.ms}ms`;
+    render();
+  }catch(e){
+    if(e.name!=='AbortError' && current===generation){
+      latEl.textContent=e.message;
+    }
+  }
 }
 
 function render(){
@@ -168,7 +180,7 @@ function render(){
   outEl.innerHTML = `<div class="grid">` + results.map((r,i)=>{
     const sa = r.license_class === 'share_alike';
     return `<div class="card" data-i="${i}" draggable="true">
-      <img src="${r.thumb}" loading="lazy" alt="" referrerpolicy="no-referrer">
+      <img src="${esc(r.thumb)}" loading="${i<12?'eager':'lazy'}" fetchpriority="${i<4?'high':'auto'}" decoding="async" alt="${esc(r.title)}" referrerpolicy="no-referrer">
       <span class="dim">${r.width}&times;${r.height}</span>
       <div class="info">
         <div class="t">${esc(r.title)}</div>
@@ -178,15 +190,16 @@ function render(){
 
   outEl.querySelectorAll('.card').forEach(c=>{
     const i = +c.dataset.i;
+    c.querySelector('img').onerror = () => { c.style.opacity='.45'; c.title='Image unavailable at its source'; };
     c.onclick = () => { sel = i; mark(); copyImage(results[i]); };
     c.ondragstart = e => {
       const r = results[i];
       const name = (r.title || 'image').replace(/[^\w.-]/g,'_').slice(0,60) + '.webp';
-      const url = location.origin + r.thumb;
+      const url = new URL(r.thumb, location.href).href;
       // DownloadURL is what makes a drop into Finder / Premiere produce a real file
       e.dataTransfer.setData('DownloadURL', `image/webp:${name}:${url}`);
-      e.dataTransfer.setData('text/uri-list', r.full_url);
-      e.dataTransfer.setData('text/plain', r.full_url);
+      e.dataTransfer.setData('text/uri-list', r.full_url || r.source_url || url);
+      e.dataTransfer.setData('text/plain', r.full_url || r.source_url || url);
       e.dataTransfer.effectAllowed = 'copy';
     };
   });
@@ -201,12 +214,14 @@ function mark(){
 
 async function copyImage(r){
   try{
-    const blob = await (await fetch(r.thumb)).blob();
+    const response = await fetch(r.thumb);
+    if(!response.ok) throw new Error('Image unavailable');
+    const blob = await response.blob();
     // clipboard only accepts png, so transcode through a canvas
     const bmp = await createImageBitmap(blob);
     const cv = Object.assign(document.createElement('canvas'),
                              {width:bmp.width, height:bmp.height});
-    cv.getContext('2d').drawImage(bmp,0,0);
+    cv.getContext('2d').drawImage(bmp,0,0); bmp.close();
     const png = await new Promise(res => cv.toBlob(res,'image/png'));
     await navigator.clipboard.write([new ClipboardItem({'image/png': png})]);
     toast('Copied — ' + (r.creator ? r.license + ', ' + strip(r.creator) : r.license));
@@ -220,11 +235,13 @@ document.addEventListener('keydown', e=>{
     if(results.length && sel > 0){ sel--; mark(); e.preventDefault(); }
   } else if(e.key === 'Enter' && sel >= 0){
     copyImage(results[sel]);
+  } else if(e.key === 'Enter' && document.activeElement === qEl){
+    run();
   } else if(e.key === 'Escape'){ qEl.focus(); qEl.select(); }
 });
 
 $('#commercial').onchange = run;
-const esc = s => (s||'').replace(/[<>&]/g, c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+const esc = s => (s||'').replace(/[<>&"']/g, c=>({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'}[c]));
 const strip = s => esc(s).replace(/\s+/g,' ').slice(0,60);
 </script>
 </body>

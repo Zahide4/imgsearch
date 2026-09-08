@@ -1,162 +1,69 @@
-# Zero-cost cloud deployment
+# Cloud deployment and corpus build
 
-Every component below is either the real production component or its managed
-equivalent, running on a free tier. Nothing is a toy substitute.
+The public application runs `server/` on Render. Query text is embedded there;
+Qdrant Cloud stores vectors and metadata. Browsers load images through wsrv.nl.
+`server.py` and `static_site/` are older local/browser experiments, not the Render app.
 
-| Production design | Free tier used here | Capacity | Card? |
-|---|---|---|---|
-| Crawl fleet on rented VPS IPs | GitHub Actions, 20 shards | unlimited (public repo) | no |
-| Rented L4 for bulk embed | Kaggle Notebooks | 30 GPU-hrs **per week** | no |
-| Backblaze B2 + Cloudflare CDN | **wsrv.nl proxy** (display) + **HF Datasets** (archive) | unlimited display, ~free archive | **none** |
-| Qdrant on a €12/mo Hetzner box | **Qdrant Cloud free cluster** | 1 GB = ~300k int8 vectors | no |
-| FastAPI on that same box | **HF Spaces** (Docker) | 2 vCPU, 16 GB RAM | no |
-| Postgres for metadata | Qdrant payload | included | no |
+## No image corpus on your Mac
 
-**Ceiling: ~300k images**, set by the Qdrant free cluster (300k × 768d int8
-= 0.23 GB of 1 GB). Display storage is no longer a limit at all.
+Use the **Build searchable cloud corpus** GitHub Actions workflow. Each worker:
 
-**No credit card is required anywhere in this stack.**
+1. Walks disjoint Commons filename ranges, retaining both generator and image-info continuation.
+2. Filters license metadata, image type, dimensions, and extreme aspect ratios.
+3. Fetches API-provided thumbnails, makes 384px WebP derivatives, and embeds them
+   with the same `ViT-B-16-SigLIP / webli` image model as the existing corpus.
+4. Archives derivatives and license/source metadata as WebDataset tar files in
+   Hugging Face, then writes vectors into the existing Qdrant collection.
+5. Saves restart cursors in the dataset. No corpus is downloaded to your Mac or Render.
 
----
+GitHub repository secrets: `HF_TOKEN`, `HF_REPO`, `QDRANT_URL`, `QDRANT_API_KEY`.
+These must never appear in committed files or workflow inputs.
 
-## 1. Storage — nothing to sign up for
+Start with 100 images per worker (400 total):
 
-Two jobs, split, because they have opposite requirements.
-
-### Display thumbnails: wsrv.nl proxy (zero storage)
-
-`wsrv.nl` is a free public image proxy on Cloudflare's edge. Give it an
-origin URL and it resizes, converts to WebP, and caches the result:
-
-    https://wsrv.nl/?url=<encoded origin>&w=384&h=384&fit=cover&output=webp&q=80&maxage=1y
-
-You already store every image's origin URL in `images.thumb_url`, so the
-display URL is derived, not stored. **No bucket, no account, no card.**
-
-Measured on this corpus:
-
-| | |
-|---|---|
-| 172 KB origins → | **28.5 KB** WebP |
-| warm (edge cached) | **235 ms** median |
-| cold | 887 ms median |
-| success rate | 24/24, then 6/6 end-to-end |
-
-It is a courtesy service — cache hard (`maxage=1y` is already set) and keep
-request volume sane. Slower than a real bucket (~30–50 ms), free forever.
-
-```bash
-export STORAGE_BACKEND=proxy      # this is the default
+```sh
+gh workflow run cloud-corpus.yml -f target_per_worker=100 -f build=pilot-v1
 ```
 
-### Archive: Hugging Face Datasets (tarballs)
+Inspect the completed pilot before scaling. There are four workers. The target
+is the number of **new images per worker for that build**, not the total collection
+size. Reusing the same build identifier resumes its counters and cursors; retain
+the same worker count. Existing Qdrant IDs are skipped. A time-limited run saves
+its cursor and reports incomplete rather than claiming the target was reached.
 
-You still need the 384px derivatives somewhere, for one reason: **changing
-embedding models later.** Without an archive that means re-crawling the
-whole internet; with one it is a 14-minute GPU job.
+After a pilot, use `(500000 - current_collection_count) / 4`, rounded down, for
+a new build's target. The last few images can be added in a final small build.
+Do not run unrelated ingestion jobs concurrently into the same collection.
 
-`cloud_sync.py` pushes them as **tarballs, not individual files** — a handful
-of large objects rather than 300k small ones. That sidesteps HF's ~100k
-files-per-repo guidance entirely, and uploads far faster.
+## Capacity and verification
 
-```bash
-export HF_TOKEN=hf_xxx HF_REPO=you/imgsearch-corpus
-python cloud_sync.py push --shard 0
+The Qdrant free plan advertises 1 GB RAM and 4 GB disk. Capacity depends on payloads,
+vector originals, quantization, HNSW, and indexing headroom; 500k is a target, not a
+measured guarantee. Keep scalar int8 quantization with full-precision rescoring.
+Measure `/metrics`, `/telemetry`, collection health, and query latency as it grows.
+HF public dataset storage is best-effort; never assume unlimited archive space.
+
+The API keeps the trained 64-token padding, pad ID 1, and SigLIP canonicalization.
+Do not shorten padding or substitute the failed four-bit text model for speed.
+The 512-entry embedding cache and 128-entry, 120-second result cache are bounded.
+The frontend cancels superseded searches and includes license filters in cache keys.
+
+Before publishing code:
+
+```sh
+.venv/bin/python -B -m unittest discover -s tests -v
+node tests/search-ui.cjs
+git diff --check
 ```
 
-Free, no card, email signup only.
+Render deploys from the GitHub default branch via `render.yaml`. The model is
+baked into the Docker image. Set `ORT_THREADS=1` initially and measure on the
+actual host. New query latency is affected by its shared CPU; cached timings
+are not an end-to-end latency guarantee. Health: `/healthz`; corpus count:
+`/api/stats`. Image-load time must be measured separately from the API response.
 
-### If you later want a real bucket
-
-`STORAGE_BACKEND=s3` switches to R2/B2 with no other code change. Worth it
-when proxy latency starts bothering you — R2's free tier is 10 GB with zero
-egress, and Backblaze B2's 10 GB tier may not require a card either (worth
-two minutes to check).
-
-## 2. Qdrant Cloud  (3 min)
-
-1. cloud.qdrant.io → **Create free cluster** (1 GB, no card, no expiry)
-2. Copy the cluster URL and create an API key
-
-```bash
-export QDRANT_URL=https://xxxx.cloud.qdrant.io:6333
-export QDRANT_API_KEY=<key>
-python push_qdrant.py create
-```
-
-Creates a 768d cosine collection with **int8 scalar quantization,
-`always_ram=True`** and originals on disk — the exact config that lets 100M
-vectors run on one box at full scale, just smaller.
-
-## 3. Crawl in parallel  (GitHub Actions)
-
-Push this repo to GitHub **public** (free unlimited Actions minutes), then
-Settings → Secrets → Actions:
-
-| secret | value |
-|---|---|
-| `CRAWL_UA` | `imgsearch/0.1 (https://github.com/you/repo; you@mail.com)` |
-| `HF_TOKEN` `HF_REPO` | for the derivative archive |
-
-Actions → **crawl** → Run workflow. 20 runners, each with its own IP. Each
-resizes to 384px, tars its shard, and pushes the tarball to HF before the
-runner is destroyed (runners have no persistent disk).
-
-⚠️ Fair use: legitimate as a bounded dataset build for a project you publish.
-A permanent 24/7 crawl farm is Actions abuse. Keep runs manual.
-
-## 4. Embed on a free GPU  (Kaggle)
-
-New notebook → Accelerator **GPU**, Internet **On**:
-
-```python
-!pip install -q open_clip_torch boto3 qdrant-client
-!git clone https://github.com/YOU/imgsearch-proto && cd imgsearch-proto
-%env S3_ENDPOINT=...
-%env QDRANT_URL=...
-!python embed_gpu.py --from-s3 --push
-```
-
-| | throughput | 300k images |
-|---|---|---|
-| M4 local | ~44 img/s | 1.9 hours |
-| Kaggle P100 (fp16) | ~350 img/s | **~14 min** |
-
-## 5. Deploy the API  (HF Spaces)
-
-huggingface.co → **New Space** → SDK **Docker** → push the `space/` folder.
-Space Settings → Variables and secrets:
-
-    QDRANT_URL, QDRANT_API_KEY, QDRANT_COLLECTION=images
-
-The Dockerfile bakes the text tower into the image so cold starts don't
-re-download it.
-
----
-
-## The one structural rule
-
-**The API returns JSON only. Thumbnails go browser → CDN directly.**
-
-```
-browser ──query──> Space ──vector──> Qdrant Cloud
-   │                                      │
-   └──── thumbnails ◄── wsrv.nl edge ◄────┘
-                            │
-                       origin CDNs
-```
-
-Proxying images through the API would funnel every thumbnail byte through
-one container — destroying latency, and burning the free tier in a day.
-Each result's `cdn` field in the Qdrant payload is what the browser loads.
-
-## Measured on 2,071 vectors
-
-| | |
-|---|---|
-| Qdrant query (in-memory, int8) | **1.7–4.8 ms** |
-| License-filtered query | 10 ms |
-| Proxy thumbnail, warm | 235 ms, 28.5 KB |
-| `"lonely figure in vast empty space"` | abandoned factory, empty metro station, Tate Modern interior |
-
-That last row is the thesis: nothing was tagged "lonely" or "empty".
+Source documentation:
+- https://qdrant.tech/documentation/cloud/create-cluster/
+- https://www.mediawiki.org/wiki/API:Allimages
+- https://www.mediawiki.org/wiki/API:Etiquette
+- https://huggingface.co/docs/hub/storage-limits

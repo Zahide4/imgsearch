@@ -18,4 +18,4 @@ services:
       - key: QDRANT_COLLECTION
         value: images
       - key: ORT_THREADS
-        value: "2"
+        value: "1"

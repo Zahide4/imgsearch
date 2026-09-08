@@ -1,148 +1,154 @@
 #!/usr/bin/env python3
-"""
-app.py -- the production search API, sized to fit a free 512MB host.
-
-This is the real thing: model in server RAM, Qdrant serves the index, the
-browser downloads nothing but HTML. Identical in shape to what you'd run on
-a paid box -- only the host is free.
-
-WHY ONNX RUNTIME AND NOT PYTORCH
-    torch + open_clip   ~2 GB RSS   -> needs a paid instance
-    onnxruntime + int8    306 MB    -> fits Render/Koyeb/Fly free tiers
-    Verified identical embeddings either way.
-
-WHY `tokenizers` AND NOT `transformers`
-    transformers pulls 218 MB of extra RSS for a tokenizer we can load
-    directly. But two things must be replicated by hand or search silently
-    degrades (both measured, both wrong by default):
-      1. pad with token id 1, not 0
-      2. SigLIP canonicalises text first: lowercase, strip punctuation,
-         collapse whitespace. Without it 'A Steam Locomotive!' tokenises
-         to something completely different from 'a steam locomotive'.
-    With both fixes, tokenisation matches transformers exactly (6/6 probes).
-
-Env: QDRANT_URL, QDRANT_API_KEY, QDRANT_COLLECTION, PORT
-"""
-
+"""Cloud search: SigLIP ONNX text encoder, Qdrant index, direct CDN images."""
+import asyncio
 import os
 import re
 import string
 import time
+from collections import OrderedDict
 from pathlib import Path
+from urllib.parse import quote
 
 import numpy as np
 import onnxruntime as ort
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse
 from huggingface_hub import hf_hub_download
-from qdrant_client import QdrantClient, models
+from qdrant_client import AsyncQdrantClient, models
 from tokenizers import Tokenizer
 
 ROOT = Path(__file__).resolve().parent
-REPO = "Xenova/siglip-base-patch16-224"
-ONNX = "onnx/text_model_int8.onnx"
-COLLECTION = os.environ.get("QDRANT_COLLECTION", "images")
+REPO, ONNX = 'Xenova/siglip-base-patch16-224', 'onnx/text_model_int8.onnx'
+COLLECTION = os.getenv('QDRANT_COLLECTION', 'images')
 DIM, MAXLEN, PAD_ID = 768, 64, 1
-
-app = FastAPI(title="imgsearch")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
-                   allow_headers=["*"])
-S = {"sess": None, "tok": None, "qc": None, "cache": {}}
-
-_PUNCT = str.maketrans("", "", string.punctuation)
-
-
-def canon(t: str) -> str:
-    """SigLIP text canonicalisation. Must match the training preprocessing."""
-    return re.sub(r"\s+", " ", t.lower().translate(_PUNCT)).strip()
+app = FastAPI(title='imgsearch')
+app.add_middleware(CORSMiddleware, allow_origins=['*'], allow_methods=['GET'], allow_headers=['*'])
+S = {'sess': None, 'tok': None, 'qc': None, 'cache': OrderedDict(),
+     'results': OrderedDict(), 'lock': None, 'stats': (0, 0)}
+_PUNCT = str.maketrans('', '', string.punctuation)
+ALLOWED_LICENSES = {'public_domain', 'attribution', 'share_alike'}
 
 
-@app.on_event("startup")
-def startup():
-    t0 = time.time()
-    path = hf_hub_download(REPO, ONNX)
-    so = ort.SessionOptions()
-    so.intra_op_num_threads = int(os.environ.get("ORT_THREADS", "2"))
-    S["sess"] = ort.InferenceSession(path, so, providers=["CPUExecutionProvider"])
-
-    tok = Tokenizer.from_file(hf_hub_download(REPO, "tokenizer.json"))
-    tok.enable_truncation(MAXLEN)
-    tok.enable_padding(length=MAXLEN, pad_id=PAD_ID, pad_token="</s>")
-    S["tok"] = tok
-
-    url = os.environ.get("QDRANT_URL")
-    if url:
-        S["qc"] = QdrantClient(url=url, api_key=os.environ.get("QDRANT_API_KEY"),
-                               timeout=30)
-    print(f"ready in {time.time() - t0:.1f}s")
+def canon(text):
+    return re.sub(r'\s+', ' ', text.lower().translate(_PUNCT)).strip()
 
 
-def embed(text: str) -> list:
-    if text in S["cache"]:
-        return S["cache"][text]
-    ids = np.array([S["tok"].encode(canon(text)).ids], dtype=np.int64)
-    v = S["sess"].run(None, {"input_ids": ids})[1][0]
-    v = (v / np.linalg.norm(v)).astype(np.float32).tolist()
-    if len(S["cache"]) < 10_000:
-        S["cache"][text] = v
-    return v
+def remember(cache, key, value, maximum):
+    cache[key] = value
+    cache.move_to_end(key)
+    while len(cache) > maximum:
+        cache.popitem(last=False)
 
 
-@app.get("/api/search")
-def search(q: str = Query(...), limit: int = 60, license_class: str = ""):
-    t0 = time.perf_counter()
-    if not S["qc"]:
-        return JSONResponse({"error": "QDRANT_URL not set"}, status_code=503)
-    if not q.strip():
-        return {"results": [], "ms": 0}
-
-    qv = embed(q.strip())
-    t1 = time.perf_counter()
-
-    flt = None
-    if license_class:
-        flt = models.Filter(must=[models.FieldCondition(
-            key="license_class",
-            match=models.MatchAny(any=[x for x in license_class.split(",") if x]))])
-
-    hits = S["qc"].query_points(
-        COLLECTION, query=qv, limit=limit, with_payload=True, query_filter=flt,
-        search_params=models.SearchParams(
-            quantization=models.QuantizationSearchParams(rescore=True, oversampling=2.0)),
-    ).points
-    t2 = time.perf_counter()
-
-    return {
-        "results": [{
-            "id": h.payload.get("image_id"), "title": h.payload.get("title", ""),
-            "creator": h.payload.get("creator", ""), "license": h.payload.get("license", ""),
-            "license_class": h.payload.get("license_class", ""),
-            "source_url": h.payload.get("source_url", ""),
-            "width": h.payload.get("width", 0), "height": h.payload.get("height", 0),
-            "thumb": h.payload.get("cdn", ""), "score": round(float(h.score), 4),
-        } for h in hits],
-        "ms": round((t2 - t0) * 1000, 1),
-        "timing": {"embed_ms": round((t1 - t0) * 1000, 1),
-                   "ann_ms": round((t2 - t1) * 1000, 1)},
-    }
+@app.on_event('startup')
+async def startup():
+    def load():
+        opts = ort.SessionOptions()
+        opts.intra_op_num_threads = int(os.getenv('ORT_THREADS', '1'))
+        opts.inter_op_num_threads = 1
+        S['sess'] = ort.InferenceSession(hf_hub_download(REPO, ONNX), opts, providers=['CPUExecutionProvider'])
+        tok = Tokenizer.from_file(hf_hub_download(REPO, 'tokenizer.json'))
+        tok.enable_truncation(MAXLEN)
+        tok.enable_padding(length=MAXLEN, pad_id=PAD_ID, pad_token='</s>')
+        S['tok'] = tok
+    await asyncio.to_thread(load)
+    S['lock'] = asyncio.Lock()
+    if os.getenv('QDRANT_URL'):
+        S['qc'] = AsyncQdrantClient(url=os.environ['QDRANT_URL'], api_key=os.getenv('QDRANT_API_KEY'), timeout=20)
 
 
-@app.get("/api/stats")
-def stats():
-    if not S["qc"]:
-        return {"total": 0}
+@app.on_event('shutdown')
+async def shutdown():
+    if S['qc']:
+        await S['qc'].close()
+
+
+def embed(text):
+    if text in S['cache']:
+        S['cache'].move_to_end(text)
+        return S['cache'][text]
+    ids = np.array([S['tok'].encode(text).ids], dtype=np.int64)
+    # Preserve trained padding and the projected text output.
+    vec = S['sess'].run(['pooler_output'], {'input_ids': ids})[0][0]
+    norm = np.linalg.norm(vec)
+    if not np.isfinite(vec).all() or norm <= 0:
+        raise RuntimeError('Invalid query embedding')
+    vec = (vec / norm).astype(np.float32).tolist()
+    remember(S['cache'], text, vec, 512)
+    return vec
+
+
+def result_from(hit):
+    p = hit.payload
+    origin = p.get('thumb_origin', '')
+    thumb = p.get('cdn', '')
+    if not thumb and origin:
+        thumb = 'https://wsrv.nl/?url=' + quote(origin, safe='') + '&w=384&h=384&fit=inside&output=webp&q=80&maxage=1y'
+    return dict(id=p.get('image_id'), title=p.get('title', ''), creator=p.get('creator', ''),
+                license=p.get('license', ''), license_class=p.get('license_class', ''),
+                license_url=p.get('license_url', ''), source_url=p.get('source_url', ''),
+                full_url=p.get('full_url', ''), width=p.get('width', 0), height=p.get('height', 0),
+                thumb=thumb, score=round(float(hit.score), 4))
+
+
+@app.get('/api/search')
+async def search(request: Request, q: str = Query(..., max_length=300),
+                 limit: int = Query(60, ge=1, le=100), license_class: str = ''):
+    start = time.perf_counter()
+    text = canon(q)
+    licenses = tuple(sorted(set(filter(None, license_class.split(',')))))
+    if set(licenses) - ALLOWED_LICENSES:
+        raise HTTPException(400, 'Unknown license filter')
+    if not text:
+        return {'results': [], 'ms': 0}
+    if S['qc'] is None:
+        raise HTTPException(503, 'Search is not configured')
+    key = (text, limit, licenses)
+    cached = S['results'].get(key)
+    if cached and time.monotonic() - cached[0] < 120:
+        S['results'].move_to_end(key)
+        return {**cached[1], 'cached': True, 'ms': 0, 'timing': {'embed_ms': 0, 'ann_ms': 0}}
+    # One embedding at a time on a small CPU. Waiting clients that have
+    # disconnected do not consume another expensive inference slot.
+    async with S['lock']:
+        if await request.is_disconnected():
+            raise HTTPException(499, 'Search cancelled')
+        vector = await asyncio.to_thread(embed, text)
+    embedded = time.perf_counter()
+    flt = models.Filter(must=[models.FieldCondition(key='license_class', match=models.MatchAny(any=list(licenses)))]) if licenses else None
     try:
-        return {"total": S["qc"].get_collection(COLLECTION).points_count}
-    except Exception as e:
-        return {"total": 0, "error": str(e)}
+        hits = (await S['qc'].query_points(COLLECTION, query=vector, limit=limit, with_payload=True,
+                query_filter=flt, search_params=models.SearchParams(hnsw_ef=128,
+                quantization=models.QuantizationSearchParams(rescore=True, oversampling=2.0)))).points
+    except Exception:
+        raise HTTPException(503, 'Search is temporarily unavailable. Please try again.')
+    end = time.perf_counter()
+    data = {'results': [result_from(hit) for hit in hits], 'ms': round((end-start)*1000, 1),
+            'timing': {'embed_ms': round((embedded-start)*1000, 1), 'ann_ms': round((end-embedded)*1000, 1)}}
+    remember(S['results'], key, (time.monotonic(), data), 128)
+    return data
 
 
-@app.get("/healthz")
+@app.get('/api/stats')
+async def stats():
+    if not S['qc']:
+        return {'total': 0}
+    stamp, count = S['stats']
+    if time.monotonic() - stamp > 30:
+        try:
+            count = (await S['qc'].get_collection(COLLECTION)).points_count
+            S['stats'] = (time.monotonic(), count)
+        except Exception:
+            return {'total': count, 'stale': True}
+    return {'total': count}
+
+
+@app.get('/healthz')
 def healthz():
-    return {"ok": S["sess"] is not None}
+    return {'ok': S['sess'] is not None}
 
 
-@app.get("/")
+@app.get('/')
 def index():
-    return FileResponse(ROOT / "static" / "index.html")
+    return FileResponse(ROOT / 'static' / 'index.html', headers={'Cache-Control': 'no-cache'})

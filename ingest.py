@@ -38,9 +38,6 @@ from urllib.parse import urlparse
 from pathlib import Path
 
 import httpx
-import numpy as np
-import torch
-import torch.nn.functional as F
 from PIL import Image
 
 ROOT = Path(__file__).resolve().parent
@@ -140,6 +137,142 @@ def _clean(html: str) -> str:
     return re.sub(r"<[^>]+>", "", html or "").strip()
 
 
+
+# ---------------------------------------------------------------- enumeration
+
+# Prefix points that split the Commons filename space for parallel walking.
+# `aifrom` lets each worker start at a different point in the sorted namespace,
+# which is what makes enumeration shardable across GitHub Actions runners.
+ENUM_PREFIXES = [
+    "0","1","2","3","4","5","6","7","8","9",
+    "A","Ab","Am","B","Bo","C","Ch","Co","D","De","E","F","Fi","Fr","G","Go",
+    "H","He","I","J","K","L","Li","M","Ma","Mo","N","O","P","Pa","Ph","Po",
+    "Q","R","Ro","S","Sa","Sh","St","T","Th","To","U","V","W","Wi","X","Y","Z",
+]
+
+
+def commons_thumb(url: str, px: int = 800) -> str:
+    """Turn a Commons original URL into its pre-rendered thumbnail URL.
+
+    allimages returns only the master file, and those masters are huge -- the
+    first enumeration run pulled 12,101px originals and lost 819/900 fetches
+    to HTTP 429. Commons serves thumbnails at a derivable path:
+
+        .../commons/a/ab/Name.jpg
+        .../commons/thumb/a/ab/Name.jpg/800px-Name.jpg
+
+    ~20x less bandwidth and far gentler on their servers.
+    """
+    # The API appends a tracking query string
+    # (?utm_source=...&utm_content=original). Left on, it lands *inside* the
+    # derived filename and every thumb 404s.
+    url = url.split("?", 1)[0]
+    marker = "/commons/"
+    if marker not in url or "/thumb/" in url:
+        return url
+    head, tail = url.split(marker, 1)
+    parts = tail.split("/")
+    if len(parts) < 3:
+        return url
+    a, ab, fname = parts[0], parts[1], "/".join(parts[2:])
+    return f"{head}{marker}thumb/{a}/{ab}/{fname}/{px}px-{fname}"
+
+
+async def discover_enumerate(client, aifrom, want, limiter, batch=50, aito=None):
+    """Walk Commons' full file list instead of searching it.
+
+    Search only surfaces subjects you thought to type; enumeration gets
+    everything. `gaifrom` starts each worker at a different point in the
+    sorted namespace, so this shards cleanly across runners.
+
+    Uses generator=allimages + iiurlwidth so the API hands back pre-rendered
+    thumbnails. Two earlier approaches failed:
+      - list=allimages returns only the master file. Fetching 12,101px
+        originals lost 819/900 requests to HTTP 429.
+      - Deriving thumb URLs by hand (/commons/thumb/a/ab/N.jpg/800px-N.jpg)
+        is the correct MediaWiki form but Varnish answers 400.
+    Asking the API for iiurlwidth=800 works, is 10x faster than
+    list=allimages (2.1s vs 21.2s per batch), and is what the search path
+    already does.
+    """
+    out = []
+    seen = set()
+    cont = {}
+    retries = 0
+    while len(out) < want:
+        params = {
+            "action": "query", "format": "json", "formatversion": "2",
+            "generator": "allimages", "gailimit": str(batch), "gaisort": "name",
+            "prop": "imageinfo",
+            "iiprop": "url|size|extmetadata|mime", "iiurlwidth": "800",
+            "gaifrom": aifrom, "maxlag": "5",
+        }
+        if aito is not None:
+            params["gaito"] = aito
+        if cont:
+            params.update(cont)          # carries gaicontinue AND iicontinue
+        else:
+            params["gaifrom"] = aifrom
+        try:
+            async with limiter.get(COMMONS):
+                r = await client.get(COMMONS, params=params, timeout=90)
+            if r.status_code == 429:
+                retries += 1
+                if retries >= 6:
+                    raise RuntimeError("Commons remained rate limited after six attempts")
+                await asyncio.sleep(5 + random.random() * 5)
+                continue
+            if r.status_code != 200:
+                break
+            data = r.json()
+            if data.get("error"):
+                raise RuntimeError(str(data["error"]))
+            retries = 0
+        except Exception as e:
+            _warn_once(f"enumerate {aifrom}: {type(e).__name__}: {e}")
+            break
+
+        pages = data.get("query", {}).get("pages", [])
+        if not pages:
+            break
+
+        for pg in pages:
+            title = (pg.get("title") or "").removeprefix("File:")
+            if aito is not None and title.replace(" ", "_") >= aito.replace(" ", "_"):
+                continue
+            image_id = f"commons:{pg['pageid']}"
+            if image_id in seen:
+                continue
+            ii = (pg.get("imageinfo") or [{}])[0]
+            thumb = ii.get("thumburl")
+            if not thumb or ii.get("mime") not in ("image/jpeg", "image/png"):
+                continue
+            if (ii.get("width") or 0) < 320 or (ii.get("height") or 0) < 320:
+                continue                     # skip icons and scan fragments
+            meta = ii.get("extmetadata", {}) or {}
+            lic = _clean(meta.get("LicenseShortName", {}).get("value", ""))
+            if not license_ok(lic):
+                continue
+            seen.add(image_id)
+            out.append({
+                "id": image_id,
+                "title": title,
+                "creator": _clean(meta.get("Artist", {}).get("value", ""))[:200],
+                "license": lic,
+                "license_url": _clean(meta.get("LicenseUrl", {}).get("value", "")),
+                "source_url": ii.get("descriptionurl", ""),
+                "full_url": ii.get("url", ""),
+                "thumb_url": thumb,
+                "width": ii.get("width", 0), "height": ii.get("height", 0),
+                "topic": f"enum:{aifrom}", "tags": "",
+            })
+
+        cont = data.get("continue")
+        if not cont:
+            break
+    return out[:want]
+
+
 # ---------------------------------------------------------------- rate limiting
 
 class HostLimiter:
@@ -166,14 +299,10 @@ class HostLimiter:
 
 OPENVERSE = "https://api.openverse.org/v1/images/"
 
-# Anonymous Openverse is capped at page_size=20 (larger returns 401), which
-# makes discovery the bottleneck: 200 results per (topic,source) costs 10 API
-# calls, all against one host. A FREE key raises the cap to 500 -- one call
-# instead of ten. Register at:
-#   https://api.openverse.org/v1/auth_tokens/register/
-# then set OPENVERSE_TOKEN. Worth ~10x on total crawl time.
+# Live tests found the standard tier still capped at 20 results per page,
+# with no bulk throughput benefit from credentials. Use enumeration for bulk.
 OV_TOKEN = os.environ.get("OPENVERSE_TOKEN", "")
-OV_PAGE = 500 if OV_TOKEN else 20
+OV_PAGE = 20  # Standard credentials did not lift this cap in live tests.
 
 # Commercial-safe licences ONLY, enforced at the API. Note that Openverse's
 # own `license_type=commercial` still returns ND (no-derivatives), which
@@ -267,7 +396,7 @@ async def discover(client, topic, limit, sem):
             "iiurlwidth": "800",
         }
         try:
-            async with sem:
+            async with sem.get(COMMONS):
                 r = await client.get(COMMONS, params=params, timeout=30)
             if r.status_code == 429:
                 await asyncio.sleep(5)
@@ -368,7 +497,8 @@ async def fetch_and_store(client, row, limiter, attempts=4):
 
 
 async def crawl(topics, per_topic, per_host=6, retry_failed=False,
-                sources=("commons", "openverse"), shard=0, shards=1):
+                sources=("commons", "openverse"), shard=0, shards=1,
+                enum_target=0):
     con = db_connect()
     limiter = HostLimiter(per_host)
     headers = {"User-Agent": UA}
@@ -383,6 +513,11 @@ async def crawl(topics, per_topic, per_host=6, retry_failed=False,
     async with httpx.AsyncClient(headers=headers, follow_redirects=True) as client:
         # ---- discovery
         jobs = []
+        if "enumerate" in sources:
+            # Each walk has an exclusive upper boundary.
+            mine = [x for k, x in enumerate(ENUM_PREFIXES) if k % shards == shard]
+            per = max(1, enum_target // max(len(mine), 1))
+            jobs += [("enumerate", pfx, per) for pfx in mine]
         if "commons" in sources:
             jobs += [("commons", t, None) for t in topics]
         if "openverse" in sources:
@@ -393,6 +528,10 @@ async def crawl(topics, per_topic, per_host=6, retry_failed=False,
         found = 0
 
         async def run_job(kind, topic, src):
+            if kind == "enumerate":
+                pos = ENUM_PREFIXES.index(topic)
+                end = ENUM_PREFIXES[pos + 1] if pos + 1 < len(ENUM_PREFIXES) else None
+                return await discover_enumerate(client, topic, src, limiter, aito=end)
             if kind == "commons":
                 return await discover(client, topic, per_topic, limiter)
             return await discover_openverse(client, topic, src, per_topic, limiter)
@@ -457,6 +596,7 @@ async def crawl(topics, per_topic, per_host=6, retry_failed=False,
 # ---------------------------------------------------------------- embedding
 
 def get_device():
+    import torch
     if torch.backends.mps.is_available():
         return "mps"          # Apple GPU
     if torch.cuda.is_available():
@@ -476,6 +616,9 @@ def load_model():
 
 
 def embed_all(batch_size=32):
+    import numpy as np
+    import torch
+    import torch.nn.functional as F
     con = db_connect()
     todo = con.execute("""
         SELECT i.id FROM images i
@@ -526,6 +669,7 @@ def embed_all(batch_size=32):
 
 
 def build_matrix():
+    import numpy as np
     """Collapse the vector table into one dense matrix the server mmaps.
 
     This is the prototype's stand-in for 'build the HNSW index and ship a
@@ -563,13 +707,24 @@ def main():
     ap.add_argument("--per-host", type=int, default=6,
                     help="concurrent fetches PER HOST (not global). 6 is polite.")
     ap.add_argument("--source", default="commons,openverse",
-                    help="commons, openverse, or both (comma separated)")
+                    help="commons, openverse, enumerate (comma separated). "
+                         "'enumerate' walks the full Commons file list instead "
+                         "of searching -- the only path that scales past ~150k, "
+                         "since Openverse sustains only ~0.4 req/s.")
+    ap.add_argument("--enum-target", type=int, default=50000,
+                    help="images this shard should enumerate from Commons")
     ap.add_argument("--shard", type=int, default=0)
     ap.add_argument("--shards", type=int, default=1,
                     help="split topics across N parallel workers/IPs")
     ap.add_argument("--retry-failed", action="store_true",
                     help="re-attempt rows that previously failed (mostly 429s)")
     args = ap.parse_args()
+    if args.shards < 1 or not 0 <= args.shard < args.shards:
+        ap.error("require --shards >= 1 and 0 <= --shard < --shards")
+    if args.per_host < 1 or args.enum_target < 1 or args.per_topic < 1:
+        ap.error("concurrency and image targets must be positive")
+    if set(args.source.split(",")) - {"commons", "openverse", "enumerate"}:
+        ap.error("unknown source")
 
     if "sayeedshadab@gmail.com" in UA:
         print("!! Edit UA at the top of ingest.py with a real contact URL/email.")
@@ -581,7 +736,7 @@ def main():
         asyncio.run(crawl(topics, args.per_topic, args.per_host,
                           args.retry_failed,
                           tuple(x.strip() for x in args.source.split(",")),
-                          args.shard, args.shards))
+                          args.shard, args.shards, args.enum_target))
 
     if not args.crawl_only:
         embed_all()

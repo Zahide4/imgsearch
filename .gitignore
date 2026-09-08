@@ -6,3 +6,4 @@ static_site/vectors.bin
 static_site/meta.json
 ingest_v1_backup.py
 .DS_Store
+worker-data/
