@@ -345,6 +345,28 @@
         </table>
       </div>
 
+
+      <h3>Alternatives to the CAX31</h3>
+      <p class="sec-note">The box is sized by the quantization choice, not the other way round. int8 needs ~11&nbsp;GB of RAM at 10M; binary with disk rescore needs ~4.3&nbsp;GB, which fits a machine half the price.</p>
+      <div class="tablewrap">
+        <table>
+          <caption>Vector store + API host, 10M images</caption>
+          <thead><tr><th>Option</th><th>Specs</th><th class="num">Monthly</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td><strong>Hetzner CAX21</strong> (ARM)</td><td>4&nbsp;vCPU, 8&nbsp;GB, 80&nbsp;GB NVMe</td><td class="num">&euro;6.49</td><td>Fits 10M with <em>binary</em> quantization. Halves the bill; little headroom.</td></tr>
+            <tr><td>Hetzner CAX31 (ARM)</td><td>8&nbsp;vCPU, 16&nbsp;GB, 160&nbsp;GB</td><td class="num">&euro;12.49</td><td>Baseline. Room for int8 and for the corpus to overshoot.</td></tr>
+            <tr><td>Hetzner CX32 (x86)</td><td>4&nbsp;vCPU, 8&nbsp;GB, 80&nbsp;GB</td><td class="num">&euro;7.55</td><td>ARM is cheaper at identical specs; Qdrant runs fine on ARM.</td></tr>
+            <tr><td>Netcup ARM</td><td>8&nbsp;vCPU, 16&nbsp;GB, 512&nbsp;GB</td><td class="num">~&euro;6&ndash;8</td><td>Cheaper than CAX31 for the same specs, but usually a 12-month commitment.</td></tr>
+            <tr><td>Contabo</td><td>6&nbsp;vCPU, 16&nbsp;GB, 400&nbsp;GB</td><td class="num">~&euro;10</td><td><span class="pill warn">caution</span> oversubscribed; variable I/O lands directly in query latency.</td></tr>
+            <tr><td>Oracle Always Free</td><td>4&nbsp;ARM, 24&nbsp;GB, 200&nbsp;GB</td><td class="num">$0</td><td><span class="pill warn">caution</span> genuinely free, but no SLA, scarce capacity, instances reclaimable.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="col">
+        <p>Avoid oversubscribed hosts for this role specifically. The API runs SigLIP text embedding on CPU for every uncached query, and binary rescoring reads NVMe on every search &mdash; both turn a noisy neighbour into visible p99 latency. Hetzner's Ampere cores are dedicated, which is worth more here than the few euros saved.</p>
+        <p>Prices are list at time of writing and move; re-check before committing.</p>
+      </div>
+
       <div class="col">
         <p>At 100M, int8 vectors alone are 77&thinsp;GB and no longer fit. Binary quantization drops them to 9.6&thinsp;GB, and the HNSW graph &mdash; 128&nbsp;bytes per point at <code>m=16</code> &mdash; becomes the larger consumer at 12.8&thinsp;GB. Keep full-precision vectors on NVMe and rescore the top candidates.</p>
         <p><strong>Storage is never the cost.</strong> At both scales the bucket is under a third of the bill; the vector store is the rest.</p>
