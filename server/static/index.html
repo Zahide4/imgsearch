@@ -209,7 +209,7 @@ function render(){
     const sa = r.license_class === 'share_alike';
     return `<div class="card" data-i="${i}" draggable="true">
       <img src="${esc(r.thumb)}" loading="${i<12?'eager':'lazy'}" fetchpriority="${i<4?'high':'auto'}" decoding="async" alt="${esc(r.title)}" referrerpolicy="no-referrer">
-      <span class="dim">${r.width}&times;${r.height}</span>
+      ${(r.width && r.height) ? `<span class="dim">${r.width}&times;${r.height}</span>` : ''}
       <div class="prog"><div class="ring"></div><span class="ptxt"></span></div>
       <div class="info">
         <div class="t">${esc(r.title)}</div>
@@ -323,17 +323,33 @@ async function copyImage(r){
     if(ring) ring.textContent = cls === 'copied' ? '\u2713' : '';
   };
 
-  // Copy the FULL-RESOLUTION original, not the 384px grid thumbnail.
-  // A 384px copy is fine for a mood board and useless in Premiere or
-  // Photoshop, which is who this is for. Full-res costs seconds and several
-  // MB, so the card shows progress instead of appearing frozen.
+  // Copy the MASTER, not the grid thumbnail and not the intermediate the
+  // proxy was pointed at.
+  //
+  // The card badge reports the master's dimensions from source metadata, but
+  // the proxy origin for a Commons record is a pre-rendered 960px derivative
+  // -- so a card advertising 2988x5312 was copying 960x1707 without saying
+  // so. full_url is the master, but it is not uniformly safe: for some
+  // records it resolves to the HTML description page instead of the file.
+  // So try candidates in order of quality and accept the first that actually
+  // returns image bytes.
   const el = card && card.querySelector('img');
-  const full = originOf(r.thumb) || (el && el.currentSrc) || r.thumb;
+  const candidates = [r.full_url, originOf(r.thumb), el && el.currentSrc, r.thumb]
+    .filter((u, i, a) => u && a.indexOf(u) === i);
 
   setState('busy','fetching');
   try{
-    const resp = await fetch(full);
-    if(!resp.ok) throw new Error('unavailable');
+    let resp = null;
+    for(const u of candidates){
+      try{
+        const attempt = await fetch(u);
+        if(!attempt.ok) continue;
+        const ct = attempt.headers.get('content-type') || '';
+        if(!ct.startsWith('image/')) continue;   // description page, not a file
+        resp = attempt; break;
+      }catch(e){ /* try the next candidate */ }
+    }
+    if(!resp) throw new Error('no usable source');
 
     // Stream so the percentage is real, not a fake animation.
     // Not every origin sends content-length -- Wikimedia does, rawpixel does
@@ -370,7 +386,13 @@ async function copyImage(r){
 
     await navigator.clipboard.write([new ClipboardItem({'image/png': png})]);
     setState('copied','');
-    toast(`Copied ${w}\u00d7${h} \u00b7 ${(png.size/1e6).toFixed(1)} MB \u00b7 ${r.license}`);
+    // Two different reasons the copy can be smaller than the badge, and they
+    // mean opposite things to the user: the source only had a derivative, or
+    // we downscaled a perfectly good master to keep the clipboard sane.
+    let note = '';
+    if (bmp.width < (r.width || 0) * 0.9) note = ' (largest the source offers)';
+    else if (scale < 1) note = ' (capped from ' + bmp.width + 'px)';
+    toast(`Copied ${w}\u00d7${h}${note} \u00b7 ${(png.size/1e6).toFixed(1)} MB \u00b7 ${r.license}`);
     setTimeout(() => setState(null,''), 1400);
   }catch(e){
     setState(null,'');
