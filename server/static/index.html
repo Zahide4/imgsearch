@@ -391,7 +391,7 @@ async function copyImage(r){
     // we downscaled a perfectly good master to keep the clipboard sane.
     let note = '';
     if (bmp.width < (r.width || 0) * 0.9) note = ' (largest the source offers)';
-    else if (scale < 1) note = ' (capped from ' + bmp.width + 'px)';
+    else if (sc < 1) note = ' (capped from ' + bmp.width + 'px)';
     toast(`Copied ${w}\u00d7${h}${note} \u00b7 ${(png.size/1e6).toFixed(1)} MB \u00b7 ${r.license}`);
     setTimeout(() => setState(null,''), 1400);
   }catch(e){
