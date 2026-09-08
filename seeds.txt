@@ -1,113 +1,525 @@
-# Seed topics for corpus building.
-# Deliberately spread across the buckets from the coverage test so you can
-# judge each category separately. Add/remove freely and re-run ingest.
+# 481 curated topics across 20 categories.
+# The 88-topic list yielded ~143 img/topic = 12.6k. Corpus is topics-bound.
+# No modifier cross-product: near-duplicate topics ('forest' / 'forest macro')
+# return overlapping results and waste the Openverse API budget.
 
-# --- nature & animals
-forest canopy
-mountain range snow
+# --- nature
+forest
+mountain range
 ocean waves
 desert dunes
-thunderstorm lightning
-autumn leaves
+river
+waterfall
+glacier
+volcano
+canyon
+meadow
+swamp
+tundra
+rainforest
+coastline
+cave
+valley
+lake
+island
+cliff
+sand dune
+jungle
+prairie
+wetland
+fjord
+geyser
+hot spring
 coral reef
-bird of prey
-wolf wildlife
-butterfly macro
-mushroom fungi
-succulent plants
+kelp forest
+savanna
+badlands
 
-# --- places & architecture
-city skyline night
-brutalist architecture
+# --- weather
+thunderstorm
+lightning
+fog
+snowstorm
+rainbow
+sunset
+sunrise
+storm clouds
+frost
+mist
+hail
+aurora borealis
+tornado
+heavy rain
+drought cracked earth
+icicles
+blizzard
+dust storm
+
+# --- animals
+wolf
+eagle
+tiger
+elephant
+whale
+owl
+fox
+bear
+deer
+horse
+butterfly
+bee
+spider
+snake
+frog
+octopus
+jellyfish
+shark
+penguin
+hummingbird
+lizard
+crab
+dragonfly
+beetle
+ant
+moth
+squirrel
+rabbit
+otter
+seal
+bat
+turtle
+chameleon
+parrot
+swan
+heron
+goat
+cow
+sheep
+dog
+cat
+fish school
+coral polyp
+starfish
+snail
+praying mantis
+scorpion
+hedgehog
+raccoon
+koala
+
+# --- plants
+oak tree
+fern
+moss
+cactus
+orchid
+sunflower
+bamboo
+mushroom
+lichen
+seaweed
+rose
+tulip
+maple leaf
+pine cone
+succulent
+ivy
+palm tree
+wheat field
+lavender
+algae
+dandelion
+bonsai
+vine
+thistle
+poppy
+water lily
+birch forest
+autumn leaves
+tree bark
+seed pod
+
+# --- architecture
 gothic cathedral
-japanese garden
-abandoned factory
+brutalist building
+skyscraper
+ancient ruins
+stone bridge
+lighthouse
+castle
+temple
+mosque
+pagoda
+barn
+windmill
+spiral staircase
+archway
+dome
+colonnade
+fortress
+aqueduct
+amphitheatre
+monastery
+timber frame house
+art deco building
+modernist villa
+thatched cottage
+city hall
+observatory
+water tower
+grain silo
+
+# --- interiors
+library interior
+factory floor
+warehouse
+laboratory
+kitchen
+workshop
+cathedral interior
 subway station
-lighthouse coast
-bridge suspension
-medieval castle
-modern interior
+greenhouse
+artist studio
+control room
+attic
+basement
+corridor
+museum gallery
+theatre stage
+cockpit
+operating room
+classroom
+wine cellar
 
-# --- technical & scientific diagrams
+# --- urban
+city skyline night
+alleyway
+neon signs
+street market
+rooftop view
+traffic long exposure
+graffiti wall
+construction site
+harbour
+railway yard
+parking garage
+crosswalk
+fire escape
+billboard
+street lamp
+manhole cover
+phone booth
+bus stop
+
+# --- diagrams
+human anatomy diagram
 engine cutaway diagram
-human anatomy heart
-skeleton anatomy
-circuit diagram
+circuit schematic
 molecular structure
-solar system diagram
-cross section geology
-turbine schematic
-microscope cells
+cross section diagram
+exploded view diagram
+wiring diagram
+flowchart
+orbital diagram
+geological strata
+skeleton diagram
+muscle diagram
+cell diagram
 periodic table
+star chart
+weather map
+architectural blueprint
+technical drawing
+patent drawing
+isometric diagram
+heart anatomy
+brain diagram
+eye anatomy
+plant cell
+water cycle
+food chain
+solar system diagram
+dna structure
+atom model
+turbine schematic
+hydraulic diagram
+gear mechanism
+bridge truss diagram
+electrical panel
+plumbing diagram
 
-# --- textures & backgrounds
-rust metal texture
-concrete wall texture
+# --- science
+microscope slide
+bacteria
+virus particle
+crystal formation
+dna helix
+galaxy
+nebula
+solar eclipse
+planet surface
+fossil
+mineral specimen
+chemical reaction
+petri dish
+telescope image
+x-ray image
+mri scan
+light spectrum
+plasma
+pollen grain
+diatom
+snowflake macro
+magnetic field
+laser beam
+centrifuge
+
+# --- textures
+rust texture
+concrete texture
 wood grain
-marble stone
-paper texture
+marble
+brick wall
+peeling paint
 fabric weave
-cracked paint
-water surface
+leather texture
+cracked earth
+ice crystals
+sand ripples
+corrugated metal
+brushed steel
+granite
+burlap
+denim
+paper fibre
+foam
+gravel
+asphalt
+ceramic tile
+corduroy
+velvet
+wire mesh
+rope
+cork
+slate
+terrazzo
+patina copper
+galvanised metal
 
-# --- objects
+# --- cutouts
+isolated on white background
+transparent background png
+product cutout
+object on plain background
+white background studio shot
+vector silhouette
+icon set
+pictogram
+outline drawing
+line art
+monochrome silhouette
+die cut sticker
+paper cutout
+png sticker illustration
+flat vector icon
+black silhouette shape
+
+# --- products
+wristwatch
 vintage camera
+headphones
+sneaker
+coffee cup
+wine glass
+smartphone
+laptop
+backpack
+sunglasses
+perfume bottle
+cosmetics
+jewellery
+handbag
+wooden chair
+desk lamp
+ceramic vase
+ceramic bowl
+cutlery
+teapot
 typewriter
-mechanical watch
-old books
-glass bottles
-tools workshop
-musical instruments
-bicycle
-telescope
-chess pieces
+fountain pen
+pocket watch
+binoculars
+compass
+globe
+candle
+book stack
+vinyl record
+chess set
 
 # --- food
-fresh vegetables
-coffee cup
-bread baking
-fruit still life
-spices market
+fresh bread
+coffee beans
+vegetables
+fruit
+cheese
+spices
+seafood
+pasta
+dessert
+herbs
+grains
+chocolate
+honey
+tea leaves
+street food
+sushi
+barbecue
+salad
+soup
+pastry
+citrus
+berries
+nuts
+olive oil
 
-# --- people (note: mostly no model releases -- check quality carefully)
-portrait candid
-crowd street
-hands working
-silhouette person
-dancer motion
-
-# --- historical & archival
-vintage advertisement
-world war photograph
-victorian portrait
-old map
-antique illustration
-propaganda poster
-1950s americana
-industrial revolution
-
-# --- art & museum
-oil painting landscape
-japanese woodblock print
-art deco design
-stained glass
-sculpture marble
-illuminated manuscript
-botanical illustration
-architectural drawing
-
-# --- transport & machinery
+# --- transport
 steam locomotive
 vintage car
-aircraft cockpit
 sailing ship
-tractor farm
+aircraft
+bicycle
+motorcycle
+tractor
+submarine
+hot air balloon
+cargo ship
+helicopter
+tram
+double decker bus
 rocket launch
+truck
+canoe
+gondola
+cable car
+fire engine
+ambulance
 
-# --- abstract / creative
+# --- machinery
+gears
+turbine
+piston
+hydraulic press
+conveyor belt
+crane
+robotic arm
+drill press
+lathe
+generator
+compressor
+valve
+ball bearing
+pulley
+welding sparks
+3d printer
+sewing machine
+printing press
+clockwork
+windmill mechanism
+
+# --- historical
+victorian portrait
+world war photograph
+vintage advertisement
+antique map
+illuminated manuscript
+propaganda poster
+daguerreotype
+industrial revolution
+ancient artifact
+medieval illustration
+art nouveau poster
+1920s fashion
+1950s americana
+cold war era
+silent film still
+pioneer settlement
+ancient pottery
+roman mosaic
+egyptian hieroglyph
+samurai armour
+
+# --- art
+oil painting landscape
+watercolour
+japanese woodblock print
+engraving
+marble sculpture
+stained glass
+mosaic
+fresco
+charcoal drawing
+etching
+collage
+abstract painting
+still life painting
+portrait painting
+botanical illustration
+calligraphy
+ukiyo-e
+impressionist painting
+art deco design
+bauhaus design
+
+# --- people
+hands working
+silhouette person
+crowd of people
+dancer in motion
+musician playing
+craftsman
+farmer
+chef cooking
+scientist
+athlete running
+child playing
+elderly hands
+factory worker
+person reading
+person walking
+candid portrait
+climber
+surfer
+cyclist
+potter at wheel
+
+# --- abstract
 long exposure light
-smoke abstract
-geometric pattern
 bokeh lights
-aerial drone view
+smoke
+light trails
+water reflection
+shadow play
+symmetry
+geometric pattern
+fractal
+colour gradient
+motion blur
+double exposure
 macro water drops
+oil on water
+prism light
+ink in water
+soap bubble
+paint splash
+
+# --- aerial
+aerial farmland
+drone coastline
+satellite view
+top down city
+aerial forest
+birds eye view
+aerial river
+aerial mountains
+aerial highway
+aerial harbour

@@ -166,6 +166,15 @@ class HostLimiter:
 
 OPENVERSE = "https://api.openverse.org/v1/images/"
 
+# Anonymous Openverse is capped at page_size=20 (larger returns 401), which
+# makes discovery the bottleneck: 200 results per (topic,source) costs 10 API
+# calls, all against one host. A FREE key raises the cap to 500 -- one call
+# instead of ten. Register at:
+#   https://api.openverse.org/v1/auth_tokens/register/
+# then set OPENVERSE_TOKEN. Worth ~10x on total crawl time.
+OV_TOKEN = os.environ.get("OPENVERSE_TOKEN", "")
+OV_PAGE = 500 if OV_TOKEN else 20
+
 # Commercial-safe licences ONLY, enforced at the API. Note that Openverse's
 # own `license_type=commercial` still returns ND (no-derivatives), which
 # permits commercial use but forbids cropping or compositing -- useless for
@@ -173,11 +182,15 @@ OPENVERSE = "https://api.openverse.org/v1/images/"
 OV_LICENSES = "cc0,pdm,by,by-sa"
 
 # Rotating these spreads load across completely different CDNs.
+# Measured yield per topic over 88 topics / 12.6k images:
+#   wikimedia 73, flickr 20, rawpixel 13, geograph 10, svgsilh 6, met 5,
+#   museumsvictoria 4, smithsonian 1.4, inaturalist 1.0
+# The tail costs the same API budget as the head and returns almost nothing,
+# so keep the productive sources plus svgsilh/rawpixel (the only real sources
+# of transparent cutouts, which the corpus is measurably short of).
 OV_SOURCES = [
-    "flickr", "wikimedia", "inaturalist", "met", "rawpixel", "europeana",
-    "smithsonian_national_museum_of_natural_history", "geographorguk",
-    "nasa", "svgsilh", "museumsvictoria", "digitaltmuseum",
-    "finnish_heritage_agency", "bio_diversity",
+    "flickr", "wikimedia", "rawpixel", "geographorguk", "svgsilh",
+    "met", "europeana",
 ]
 
 
@@ -188,14 +201,17 @@ async def discover_openverse(client, topic, source, limit, limiter):
     (an api.openverse.org proxy) precisely so the load spreads out.
     """
     out, page = [], 1
-    while len(out) < limit and page <= 8:
+    max_pages = 3 if OV_TOKEN else 12
+    headers = {"Authorization": f"Bearer {OV_TOKEN}"} if OV_TOKEN else None
+    while len(out) < limit and page <= max_pages:
         params = {
             "q": topic, "license": OV_LICENSES, "source": source,
-            "page_size": "20", "page": str(page),
+            "page_size": str(min(OV_PAGE, limit)), "page": str(page),
         }
         try:
             async with limiter.get(OPENVERSE):
-                r = await client.get(OPENVERSE, params=params, timeout=30)
+                r = await client.get(OPENVERSE, params=params, timeout=45,
+                                     headers=headers)
             if r.status_code == 429:
                 await asyncio.sleep(5 + random.random() * 5)
                 continue
