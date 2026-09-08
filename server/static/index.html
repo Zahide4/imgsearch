@@ -121,14 +121,31 @@ fetch('/api/stats').then(r=>r.json()).then(d=>{
     <p>Run <code>python ingest.py --per-topic 60</code> and refresh.</p></div>`;
 });
 
-// debounce + cancel in-flight: this is the whole trick behind "instant"
-qEl.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(run, 60); });
+// Debounce tuned to the BACKEND, not to feel snappy in isolation.
+// At 60ms nearly every keystroke fired a request: typing "glass bottle"
+// sent 12, which serialised on a 0.1-CPU free instance and made the last
+// one report 5600ms -- it was reporting everyone else's queue wait.
+// A single query is ~740ms, so the debounce has to exceed typing cadence.
+const DEBOUNCE_MS = 320, MIN_CHARS = 2;
+const rcache = new Map();          // query -> results, makes backspacing free
+
+qEl.addEventListener('input', () => {
+  clearTimeout(timer);
+  const v = qEl.value.trim();
+  if (rcache.has(v)) { results = rcache.get(v); sel = -1; render();
+                       latEl.innerHTML = '<b>0ms</b> &nbsp;cached'; return; }
+  timer = setTimeout(run, DEBOUNCE_MS);
+});
 
 async function run(){
   const q = qEl.value.trim();
   if(!q){ outEl.innerHTML=''; latEl.textContent=''; results=[]; return; }
+  if(q.length < MIN_CHARS) return;
+  if(rcache.has(q)){ results=rcache.get(q); sel=-1; render();
+                     latEl.innerHTML='<b>0ms</b> &nbsp;cached'; return; }
   if(ctrl) ctrl.abort();
   ctrl = new AbortController();
+  latEl.innerHTML = '<span style="opacity:.6">searching…</span>';
   const t0 = performance.now();
   try{
     const r = await fetch(`/api/search?q=${encodeURIComponent(q)}&limit=60`
@@ -136,7 +153,9 @@ async function run(){
     const d = await r.json();
     const rt = Math.round(performance.now() - t0);
     latEl.innerHTML = `<b>${rt}ms</b> &nbsp;server ${d.ms}ms`;
-    results = d.results; sel = -1; render();
+    results = d.results; rcache.set(q, d.results);
+    if(rcache.size > 300) rcache.delete(rcache.keys().next().value);
+    sel = -1; render();
   }catch(e){ if(e.name !== 'AbortError') console.error(e); }
 }
 
