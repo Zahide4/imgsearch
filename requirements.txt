@@ -1,0 +1,11 @@
+httpx>=0.27
+numpy>=1.26
+Pillow>=10.0
+torch>=2.2
+open_clip_torch>=2.24
+sentencepiece>=0.2
+protobuf>=4.25
+timm>=0.9
+transformers>=4.40
+fastapi>=0.110
+uvicorn[standard]>=0.29

@@ -1,0 +1,21 @@
+# Render Blueprint -- free tier, no credit card.
+# New > Blueprint > connect this repo. Render reads this file.
+services:
+  - type: web
+    name: imgsearch-api
+    runtime: docker
+    plan: free                 # 512MB RAM, spins down when idle
+    region: ohio               # SAME REGION AS THE QDRANT CLUSTER (us-east-2).
+                               # Cross-region adds ~300ms to every query.
+    dockerfilePath: ./server/Dockerfile
+    dockerContext: ./server
+    healthCheckPath: /healthz
+    envVars:
+      - key: QDRANT_URL
+        sync: false            # set in the Render dashboard
+      - key: QDRANT_API_KEY
+        sync: false
+      - key: QDRANT_COLLECTION
+        value: images
+      - key: ORT_THREADS
+        value: "2"

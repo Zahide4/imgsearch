@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>imgsearch</title>
+<style>
+  :root{--bg:#0d0d10;--panel:#17171c;--panel2:#1e1e25;--line:#2a2a33;
+        --fg:#eceef2;--muted:#8b8f9a;--accent:#5b8dff;--ok:#3ec98a;--warn:#e8b84b}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:14px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif}
+  .wrap{max-width:1400px;margin:0 auto;padding:28px 20px 80px}
+  .bar{position:sticky;top:0;z-index:20;background:linear-gradient(var(--bg) 78%,transparent);padding:12px 0 18px}
+  .searchbox{display:flex;align-items:center;gap:14px;background:var(--panel);
+       border:1px solid var(--line);border-radius:14px;padding:0 18px;box-shadow:0 12px 40px rgba(0,0,0,.5)}
+  .searchbox:focus-within{border-color:var(--accent)}
+  .searchbox svg{flex:none;opacity:.45}
+  #q{flex:1;background:none;border:0;outline:0;color:var(--fg);font-size:21px;padding:17px 0;font-weight:420}
+  #q::placeholder{color:#5b5f6b}
+  #q:disabled{opacity:.4}
+  .lat{font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;flex:none}
+  .lat b{color:var(--ok);font-weight:600}
+  .meta{display:flex;gap:16px;align-items:center;margin-top:11px;font-size:12px;color:var(--muted);flex-wrap:wrap}
+  .meta label{display:flex;gap:6px;align-items:center;cursor:pointer;user-select:none}
+  .chip{background:var(--panel2);border:1px solid var(--line);border-radius:20px;padding:4px 11px;cursor:pointer;color:var(--muted)}
+  .chip:hover{color:var(--fg);border-color:#3a3a45}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:12px}
+  .card{position:relative;background:var(--panel);border:1px solid var(--line);border-radius:11px;
+        overflow:hidden;cursor:grab;aspect-ratio:1;transition:transform .09s,border-color .09s}
+  .card:hover{transform:translateY(-2px);border-color:#454552}
+  .card.sel{border-color:var(--accent);box-shadow:0 0 0 2px rgba(91,141,255,.3)}
+  .card img{width:100%;height:100%;object-fit:cover;display:block;background:var(--panel2)}
+  .card .info{position:absolute;inset:auto 0 0 0;padding:22px 10px 8px;
+      background:linear-gradient(transparent,rgba(0,0,0,.93));opacity:0;transition:opacity .12s}
+  .card:hover .info,.card.sel .info{opacity:1}
+  .card .t{font-size:11px;line-height:1.35;max-height:2.7em;overflow:hidden;margin-bottom:4px}
+  .card .l{font-size:10px;color:var(--ok);font-weight:600}
+  .card .l.sa{color:var(--warn)}
+  .card .dim{position:absolute;top:7px;right:8px;font-size:10px;background:rgba(0,0,0,.7);
+      padding:2px 6px;border-radius:5px;color:var(--muted);opacity:0;transition:opacity .12s}
+  .card:hover .dim{opacity:1}
+  .empty{text-align:center;padding:70px 20px;color:var(--muted)}
+  .empty h2{color:var(--fg);font-weight:500;font-size:17px;margin:0 0 10px}
+  .prog{max-width:420px;margin:18px auto 0;height:4px;background:var(--panel2);border-radius:4px;overflow:hidden}
+  .prog i{display:block;height:100%;width:0;background:var(--accent);transition:width .25s}
+  .toast{position:fixed;bottom:26px;left:50%;transform:translateX(-50%) translateY(70px);
+     background:var(--panel2);border:1px solid var(--line);padding:11px 20px;border-radius:11px;
+     transition:transform .22s cubic-bezier(.2,.9,.3,1.2);box-shadow:0 10px 30px rgba(0,0,0,.6);font-size:13px;z-index:50}
+  .toast.on{transform:translateX(-50%) translateY(0)}
+  kbd{background:var(--panel2);border:1px solid var(--line);border-bottom-width:2px;
+      border-radius:5px;padding:1px 6px;font:11px ui-monospace,monospace}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="bar">
+    <div class="searchbox">
+      <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+      <input id="q" placeholder="Loading model&hellip;" autocomplete="off" spellcheck="false" disabled>
+      <span class="lat" id="lat"></span>
+    </div>
+    <div class="meta">
+      <span id="corpus">&mdash;</span>
+      <label><input type="checkbox" id="nosa"> hide share-alike (CC BY-SA)</label>
+      <span style="flex:1"></span>
+      <span><kbd>&larr;</kbd><kbd>&rarr;</kbd> move &nbsp; <kbd>&crarr;</kbd> copy &nbsp; drag to any app</span>
+    </div>
+    <div class="meta" id="examples"></div>
+  </div>
+  <div id="out"><div class="empty"><h2 id="boot">Starting&hellip;</h2>
+    <p id="bootsub">SigLIP is downloading to your browser. One time, then cached.</p>
+    <div class="prog"><i id="bar"></i></div></div></div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script type="module">
+import { AutoTokenizer, SiglipTextModel, env }
+  from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.6';
+env.allowLocalModels = false;
+
+const $ = s => document.querySelector(s);
+const qEl=$('#q'), outEl=$('#out'), latEl=$('#lat');
+const MODEL='Xenova/siglip-base-patch16-224', DIM=768, PX=384;
+let tokenizer, model, MAT, META, results=[], sel=-1, timer=null, busy=false, BACKEND='';
+
+const thumb = o => `https://wsrv.nl/?url=${encodeURIComponent(o)}&w=${PX}&h=${PX}&fit=cover&output=webp&q=80&maxage=1y`;
+const esc = s => (s||'').replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+
+const EXAMPLES=["steam locomotive","human heart anatomy","rusty industrial texture",
+  "lonely figure in vast empty space","misty forest at dawn","art deco poster",
+  "warm nostalgic summer evening","brutalist concrete"];
+$('#examples').innerHTML = EXAMPLES.map(e=>`<span class="chip" data-q="${e}">${e}</span>`).join('');
+$('#examples').onclick = e => { if(e.target.dataset.q){ qEl.value=e.target.dataset.q; run(); } };
+
+function toast(m){const t=$('#toast');t.textContent=m;t.classList.add('on');
+  clearTimeout(t._h);t._h=setTimeout(()=>t.classList.remove('on'),1700);}
+const setBoot=(a,b,pct)=>{const x=$('#boot'),y=$('#bootsub'),z=$('#bar');
+  if(x)x.textContent=a; if(y&&b)y.textContent=b; if(z&&pct!=null)z.style.width=pct+'%';};
+
+async function boot(){
+  try{
+    setBoot('Loading index…','vectors + metadata',10);
+    const [vb, mj] = await Promise.all([
+      fetch('vectors.bin').then(r=>r.arrayBuffer()),
+      fetch('meta.json').then(r=>r.json())
+    ]);
+    META = mj;
+    // dequantise int8 -> normalised float32 once, then search is a plain dot product
+    const q8 = new Int8Array(vb), n = META.n;
+    MAT = new Float32Array(n*DIM);
+    for(let i=0;i<n;i++){
+      let ss=0; const off=i*DIM;
+      for(let j=0;j<DIM;j++){ const v=q8[off+j]; MAT[off+j]=v; ss+=v*v; }
+      const inv=1/Math.sqrt(ss);
+      for(let j=0;j<DIM;j++) MAT[off+j]*=inv;
+    }
+    $('#corpus').textContent = n.toLocaleString()+' images · searched in your browser';
+    setBoot('Loading SigLIP…','~50 MB, cached after first visit',35);
+
+    tokenizer = await AutoTokenizer.from_pretrained(MODEL);
+    setBoot('Loading SigLIP…','text encoder',60);
+    // Backend selection, with a CORRECTNESS GATE.
+    //
+    // Measured here: q4f16 silently destroys SigLIP text embeddings --
+    // unrelated queries came out 0.86-0.97 similar to each other (should be
+    // ~0.0-0.3), so one image ranked #1 for everything. It fails fast and
+    // quiet: inference "works", results are garbage.
+    //
+    // So we never trust a backend on reputation. We load it, embed two
+    // deliberately unrelated strings, and only keep it if they are actually
+    // far apart. Otherwise fall back to q8/wasm, which is verified to match
+    // the open_clip vectors in Qdrant (cos=0.999998).
+    const prog = p => { if(p.status==='progress'&&p.total)
+        setBoot('Loading SigLIP…', `${(p.loaded/1e6).toFixed(0)} / ${(p.total/1e6).toFixed(0)} MB`,
+                60+35*(p.loaded/p.total)); };
+
+    async function sane(m){
+      const probe = async txt => {
+        const i = await tokenizer(txt,{padding:'max_length',truncation:true,max_length:64});
+        const o = await m(i);
+        const t = o.pooler_output ?? o.text_embeds ?? o.last_hidden_state;
+        const v = Float32Array.from(t.data.slice(0,DIM));
+        let ss=0; for(let k=0;k<DIM;k++) ss+=v[k]*v[k];
+        const inv=1/Math.sqrt(ss); for(let k=0;k<DIM;k++) v[k]*=inv; return v;
+      };
+      // Threshold measured, not guessed. SigLIP text embeddings are NOT
+      // centred, so even unrelated strings sit at ~0.68-0.76 cosine when the
+      // model is perfectly healthy (float32 baseline, measured over 15 pairs:
+      // range 0.677-0.763). Broken q4f16 weights scored 0.86-0.97.
+      // 0.82 sits in the gap with margin on both sides.
+      // An earlier version of this gate used 0.6 and would have rejected
+      // every WORKING backend.
+      const a = await probe('warm nostalgic summer evening'), b = await probe('a red apple');
+      let d=0; for(let k=0;k<DIM;k++) d+=a[k]*b[k];
+      return d < 0.82;
+    }
+
+    let gpu=false;
+    try { gpu = !!(navigator.gpu && await navigator.gpu.requestAdapter()); } catch(e){}
+
+    const plans = gpu
+      ? [{device:'webgpu',dtype:'fp16',tag:'webgpu/fp16'}, {dtype:'q8',tag:'wasm/q8'}]
+      : [{dtype:'q8',tag:'wasm/q8'}];
+
+    for(const plan of plans){
+      try{
+        setBoot('Loading SigLIP…', plan.tag, 62);
+        const {tag, ...opts} = plan;
+        const cand = await SiglipTextModel.from_pretrained(MODEL, {...opts, progress_callback:prog});
+        setBoot('Verifying…', tag, 96);
+        if(await sane(cand)){ model=cand; BACKEND=tag; break; }
+        console.warn(tag+' produced collapsed embeddings, falling back');
+      }catch(e){ console.warn(plan.tag+' failed:', e.message); }
+    }
+    if(!model) throw new Error('no usable backend');
+
+    setBoot('Ready','',100);
+    $('#corpus').textContent = META.n.toLocaleString()+` images · searched in your browser (${BACKEND})`;
+    qEl.disabled=false; qEl.placeholder='Search anything…'; qEl.focus();
+    outEl.innerHTML=`<div class="empty"><h2>Ready</h2><p>Type anything, or try an example above.</p></div>`;
+  }catch(e){
+    setBoot('Failed to start', String(e).slice(0,180), 0);
+    console.error(e);
+  }
+}
+
+async function embed(text){
+  const inputs = await tokenizer(text,{padding:'max_length',truncation:true,max_length:64});
+  const out = await model(inputs);
+  const t = out.pooler_output ?? out.text_embeds ?? out.last_hidden_state;
+  const v = Float32Array.from(t.data.slice(0,DIM));
+  let ss=0; for(let i=0;i<DIM;i++) ss+=v[i]*v[i];
+  const inv=1/Math.sqrt(ss); for(let i=0;i<DIM;i++) v[i]*=inv;
+  return v;
+}
+
+function topK(qv,k){
+  const n=META.n, scores=new Float32Array(n);
+  for(let i=0;i<n;i++){ let s=0; const off=i*DIM;
+    for(let j=0;j<DIM;j++) s+=MAT[off+j]*qv[j];
+    scores[i]=s; }
+  const idx=Array.from({length:n},(_,i)=>i);
+  idx.sort((a,b)=>scores[b]-scores[a]);
+  return idx.slice(0,k).map(i=>({i,score:scores[i]}));
+}
+
+qEl.addEventListener('input',()=>{clearTimeout(timer);timer=setTimeout(run,60);});
+$('#nosa').onchange = run;
+
+async function run(){
+  const text=qEl.value.trim();
+  if(!text||!model){ outEl.innerHTML=''; latEl.textContent=''; results=[]; return; }
+  if(busy) return; busy=true;
+  try{
+    const t0=performance.now();
+    const qv=await embed(text);
+    const t1=performance.now();
+    let hits=topK(qv,400);
+    const t2=performance.now();
+    if($('#nosa').checked) hits=hits.filter(h=>META.items[h.i].k!=='share_alike');
+    results=hits.slice(0,60).map(h=>({...META.items[h.i],score:h.score}));
+    latEl.innerHTML=`<b>${Math.round(t2-t0)}ms</b> &nbsp;embed ${Math.round(t1-t0)} · search ${Math.round(t2-t1)}`;
+    sel=-1; render();
+  }catch(e){ console.error(e); toast('Search failed: '+e.message); }
+  finally{ busy=false; }
+}
+
+function render(){
+  if(!results.length){ outEl.innerHTML=`<div class="empty"><h2>Nothing found</h2>
+    <p>Small corpus — that is the signal you are testing for.</p></div>`; return; }
+  outEl.innerHTML='<div class="grid">'+results.map((r,i)=>`
+    <div class="card" data-i="${i}" draggable="true">
+      <img src="${thumb(r.o)}" loading="lazy" alt="" referrerpolicy="no-referrer">
+      <span class="dim">${r.w}&times;${r.h}</span>
+      <div class="info"><div class="t">${esc(r.t)}</div>
+      <div class="l ${r.k==='share_alike'?'sa':''}">${esc(r.l)} &middot; ${r.score.toFixed(3)}</div></div>
+    </div>`).join('')+'</div>';
+
+  outEl.querySelectorAll('.card').forEach(c=>{
+    const i=+c.dataset.i, r=results[i];
+    c.onclick=()=>{sel=i;mark();copyImage(r);};
+    c.ondragstart=e=>{
+      const name=(r.t||'image').replace(/[^\w.-]/g,'_').slice(0,60)+'.webp';
+      e.dataTransfer.setData('DownloadURL',`image/webp:${name}:${thumb(r.o)}`);
+      e.dataTransfer.setData('text/uri-list',r.o);
+      e.dataTransfer.setData('text/plain',r.o);
+      e.dataTransfer.effectAllowed='copy';
+    };
+  });
+}
+function mark(){outEl.querySelectorAll('.card').forEach(c=>c.classList.toggle('sel',+c.dataset.i===sel));
+  const el=outEl.querySelector('.card.sel'); if(el)el.scrollIntoView({block:'nearest',behavior:'smooth'});}
+
+async function copyImage(r){
+  try{
+    const blob=await (await fetch(thumb(r.o),{mode:'cors'})).blob();
+    const bmp=await createImageBitmap(blob);
+    const cv=Object.assign(document.createElement('canvas'),{width:bmp.width,height:bmp.height});
+    cv.getContext('2d').drawImage(bmp,0,0);
+    const png=await new Promise(res=>cv.toBlob(res,'image/png'));
+    await navigator.clipboard.write([new ClipboardItem({'image/png':png})]);
+    toast('Copied — '+r.l+(r.c?' · '+r.c.slice(0,40):''));
+  }catch(e){ toast('Copy failed: '+e.message); }
+}
+
+document.addEventListener('keydown',e=>{
+  if(!results.length) return;
+  if(e.key==='ArrowRight'&&qEl.selectionStart===qEl.value.length){sel=Math.min(sel+1,results.length-1);mark();e.preventDefault();}
+  else if(e.key==='ArrowLeft'&&qEl.selectionStart===0&&sel>0){sel--;mark();e.preventDefault();}
+  else if(e.key==='Enter'&&sel>=0) copyImage(results[sel]);
+  else if(e.key==='Escape'){qEl.focus();qEl.select();}
+});
+
+boot();
+</script>
+</body>
+</html>

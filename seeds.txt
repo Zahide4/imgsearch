@@ -1,0 +1,113 @@
+# Seed topics for corpus building.
+# Deliberately spread across the buckets from the coverage test so you can
+# judge each category separately. Add/remove freely and re-run ingest.
+
+# --- nature & animals
+forest canopy
+mountain range snow
+ocean waves
+desert dunes
+thunderstorm lightning
+autumn leaves
+coral reef
+bird of prey
+wolf wildlife
+butterfly macro
+mushroom fungi
+succulent plants
+
+# --- places & architecture
+city skyline night
+brutalist architecture
+gothic cathedral
+japanese garden
+abandoned factory
+subway station
+lighthouse coast
+bridge suspension
+medieval castle
+modern interior
+
+# --- technical & scientific diagrams
+engine cutaway diagram
+human anatomy heart
+skeleton anatomy
+circuit diagram
+molecular structure
+solar system diagram
+cross section geology
+turbine schematic
+microscope cells
+periodic table
+
+# --- textures & backgrounds
+rust metal texture
+concrete wall texture
+wood grain
+marble stone
+paper texture
+fabric weave
+cracked paint
+water surface
+
+# --- objects
+vintage camera
+typewriter
+mechanical watch
+old books
+glass bottles
+tools workshop
+musical instruments
+bicycle
+telescope
+chess pieces
+
+# --- food
+fresh vegetables
+coffee cup
+bread baking
+fruit still life
+spices market
+
+# --- people (note: mostly no model releases -- check quality carefully)
+portrait candid
+crowd street
+hands working
+silhouette person
+dancer motion
+
+# --- historical & archival
+vintage advertisement
+world war photograph
+victorian portrait
+old map
+antique illustration
+propaganda poster
+1950s americana
+industrial revolution
+
+# --- art & museum
+oil painting landscape
+japanese woodblock print
+art deco design
+stained glass
+sculpture marble
+illuminated manuscript
+botanical illustration
+architectural drawing
+
+# --- transport & machinery
+steam locomotive
+vintage car
+aircraft cockpit
+sailing ship
+tractor farm
+rocket launch
+
+# --- abstract / creative
+long exposure light
+smoke abstract
+geometric pattern
+bokeh lights
+aerial drone view
+macro water drops

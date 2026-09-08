@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>imgsearch</title>
+<style>
+  :root{
+    --bg:#0d0d10; --panel:#17171c; --panel2:#1e1e25; --line:#2a2a33;
+    --fg:#eceef2; --muted:#8b8f9a; --accent:#5b8dff; --ok:#3ec98a; --warn:#e8b84b;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:14px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;}
+  .wrap{max-width:1400px;margin:0 auto;padding:28px 20px 80px}
+
+  .bar{position:sticky;top:0;z-index:20;background:linear-gradient(var(--bg) 78%,transparent);
+       padding:12px 0 18px}
+  .searchbox{display:flex;align-items:center;gap:14px;background:var(--panel);
+       border:1px solid var(--line);border-radius:14px;padding:0 18px;
+       box-shadow:0 12px 40px rgba(0,0,0,.5)}
+  .searchbox:focus-within{border-color:var(--accent)}
+  .searchbox svg{flex:none;opacity:.45}
+  #q{flex:1;background:none;border:0;outline:0;color:var(--fg);
+     font-size:21px;padding:17px 0;font-weight:420}
+  #q::placeholder{color:#5b5f6b}
+  .lat{font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px;flex:none}
+  .lat b{color:var(--ok);font-weight:600}
+
+  .meta{display:flex;gap:16px;align-items:center;margin-top:11px;
+        font-size:12px;color:var(--muted);flex-wrap:wrap}
+  .meta label{display:flex;gap:6px;align-items:center;cursor:pointer;user-select:none}
+  .chip{background:var(--panel2);border:1px solid var(--line);border-radius:20px;
+        padding:4px 11px;cursor:pointer;color:var(--muted)}
+  .chip:hover{color:var(--fg);border-color:#3a3a45}
+
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:12px}
+  .card{position:relative;background:var(--panel);border:1px solid var(--line);
+        border-radius:11px;overflow:hidden;cursor:grab;aspect-ratio:1;
+        transition:transform .09s ease,border-color .09s ease}
+  .card:hover{transform:translateY(-2px);border-color:#454552}
+  .card.sel{border-color:var(--accent);box-shadow:0 0 0 2px rgba(91,141,255,.3)}
+  .card img{width:100%;height:100%;object-fit:cover;display:block;
+            background:var(--panel2)}
+  .card .info{position:absolute;inset:auto 0 0 0;padding:22px 10px 8px;
+      background:linear-gradient(transparent,rgba(0,0,0,.93));
+      opacity:0;transition:opacity .12s}
+  .card:hover .info,.card.sel .info{opacity:1}
+  .card .t{font-size:11px;line-height:1.35;max-height:2.7em;overflow:hidden;
+           margin-bottom:4px}
+  .card .l{font-size:10px;color:var(--ok);font-weight:600;letter-spacing:.02em}
+  .card .l.sa{color:var(--warn)}
+  .card .dim{position:absolute;top:7px;right:8px;font-size:10px;
+      background:rgba(0,0,0,.7);padding:2px 6px;border-radius:5px;
+      color:var(--muted);opacity:0;transition:opacity .12s}
+  .card:hover .dim{opacity:1}
+
+  .empty{text-align:center;padding:90px 20px;color:var(--muted)}
+  .empty h2{color:var(--fg);font-weight:500;font-size:17px;margin:0 0 8px}
+  .empty code{background:var(--panel2);padding:2px 7px;border-radius:5px;
+              font-size:12px;color:var(--accent)}
+  .toast{position:fixed;bottom:26px;left:50%;transform:translateX(-50%) translateY(70px);
+     background:var(--panel2);border:1px solid var(--line);padding:11px 20px;
+     border-radius:11px;transition:transform .22s cubic-bezier(.2,.9,.3,1.2);
+     box-shadow:0 10px 30px rgba(0,0,0,.6);font-size:13px;z-index:50}
+  .toast.on{transform:translateX(-50%) translateY(0)}
+  kbd{background:var(--panel2);border:1px solid var(--line);border-bottom-width:2px;
+      border-radius:5px;padding:1px 6px;font:11px ui-monospace,monospace}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="bar">
+    <div class="searchbox">
+      <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/>
+           <path d="M20 20l-3.5-3.5"/></svg>
+      <input id="q" placeholder="Search anything&hellip;" autocomplete="off"
+             spellcheck="false" autofocus>
+      <span class="lat" id="lat"></span>
+    </div>
+    <div class="meta">
+      <span id="corpus">&mdash;</span>
+      <label><input type="checkbox" id="commercial" checked> hide share-alike (CC BY-SA)</label>
+      <span style="flex:1"></span>
+      <span><kbd>&larr;</kbd><kbd>&rarr;</kbd> move &nbsp;
+            <kbd>&crarr;</kbd> copy &nbsp; drag to Photoshop/Premiere</span>
+    </div>
+    <div class="meta" id="examples"></div>
+  </div>
+
+  <div id="out"></div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const $  = s => document.querySelector(s);
+const qEl = $('#q'), outEl = $('#out'), latEl = $('#lat');
+let results = [], sel = -1, ctrl = null, timer = null;
+
+const EXAMPLES = ["v12 engine cutaway","human heart anatomy","brushed metal texture",
+  "misty forest at dawn","vintage typewriter","art deco poster","circuit board macro",
+  "storm clouds over desert","medieval castle ruins","microscope diatoms"];
+
+$('#examples').innerHTML = EXAMPLES.map(e =>
+  `<span class="chip" onclick="go('${e}')">${e}</span>`).join('');
+
+function toast(msg){
+  const t = $('#toast'); t.textContent = msg; t.classList.add('on');
+  clearTimeout(t._h); t._h = setTimeout(()=>t.classList.remove('on'), 1600);
+}
+function go(q){ qEl.value = q; run(); }
+
+fetch('/api/stats').then(r=>r.json()).then(d=>{
+  $('#corpus').textContent = d.total
+    ? d.total.toLocaleString() + ' images indexed'
+    : 'empty index';
+  if(!d.total) outEl.innerHTML = `<div class="empty">
+    <h2>No index yet</h2>
+    <p>Run <code>python ingest.py --per-topic 60</code> and refresh.</p></div>`;
+});
+
+// debounce + cancel in-flight: this is the whole trick behind "instant"
+qEl.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(run, 60); });
+
+async function run(){
+  const q = qEl.value.trim();
+  if(!q){ outEl.innerHTML=''; latEl.textContent=''; results=[]; return; }
+  if(ctrl) ctrl.abort();
+  ctrl = new AbortController();
+  const t0 = performance.now();
+  try{
+    const r = await fetch(`/api/search?q=${encodeURIComponent(q)}&limit=60`
+      + ($('#commercial').checked ? '&license_class=public_domain,attribution' : ''), {signal: ctrl.signal});
+    const d = await r.json();
+    const rt = Math.round(performance.now() - t0);
+    latEl.innerHTML = `<b>${rt}ms</b> &nbsp;server ${d.ms}ms`;
+    results = d.results; sel = -1; render();
+  }catch(e){ if(e.name !== 'AbortError') console.error(e); }
+}
+
+function render(){
+  if(!results.length){
+    outEl.innerHTML = `<div class="empty"><h2>Nothing found</h2>
+      <p>Small corpus &mdash; that is the signal you are testing for.</p></div>`;
+    return;
+  }
+  outEl.innerHTML = `<div class="grid">` + results.map((r,i)=>{
+    const sa = r.license_class === 'share_alike';
+    return `<div class="card" data-i="${i}" draggable="true">
+      <img src="${r.thumb}" loading="lazy" alt="" referrerpolicy="no-referrer">
+      <span class="dim">${r.width}&times;${r.height}</span>
+      <div class="info">
+        <div class="t">${esc(r.title)}</div>
+        <div class="l ${sa?'sa':''}">${esc(r.license)} &middot; ${r.score}</div>
+      </div></div>`;
+  }).join('') + `</div>`;
+
+  outEl.querySelectorAll('.card').forEach(c=>{
+    const i = +c.dataset.i;
+    c.onclick = () => { sel = i; mark(); copyImage(results[i]); };
+    c.ondragstart = e => {
+      const r = results[i];
+      const name = (r.title || 'image').replace(/[^\w.-]/g,'_').slice(0,60) + '.webp';
+      const url = location.origin + r.thumb;
+      // DownloadURL is what makes a drop into Finder / Premiere produce a real file
+      e.dataTransfer.setData('DownloadURL', `image/webp:${name}:${url}`);
+      e.dataTransfer.setData('text/uri-list', r.full_url);
+      e.dataTransfer.setData('text/plain', r.full_url);
+      e.dataTransfer.effectAllowed = 'copy';
+    };
+  });
+}
+
+function mark(){
+  outEl.querySelectorAll('.card').forEach(c =>
+    c.classList.toggle('sel', +c.dataset.i === sel));
+  const el = outEl.querySelector('.card.sel');
+  if(el) el.scrollIntoView({block:'nearest', behavior:'smooth'});
+}
+
+async function copyImage(r){
+  try{
+    const blob = await (await fetch(r.thumb, {mode:'cors'})).blob();
+    // clipboard only accepts png, so transcode through a canvas
+    const bmp = await createImageBitmap(blob);
+    const cv = Object.assign(document.createElement('canvas'),
+                             {width:bmp.width, height:bmp.height});
+    cv.getContext('2d').drawImage(bmp,0,0);
+    const png = await new Promise(res => cv.toBlob(res,'image/png'));
+    await navigator.clipboard.write([new ClipboardItem({'image/png': png})]);
+    toast('Copied — ' + (r.creator ? r.license + ', ' + strip(r.creator) : r.license));
+  }catch(e){ toast('Copy failed: ' + e.message); }
+}
+
+document.addEventListener('keydown', e=>{
+  if(e.key === 'ArrowRight' && document.activeElement !== qEl || e.key === 'ArrowRight' && qEl.selectionStart === qEl.value.length){
+    if(results.length){ sel = Math.min(sel+1, results.length-1); mark(); e.preventDefault(); }
+  } else if(e.key === 'ArrowLeft' && qEl.selectionStart === 0){
+    if(results.length && sel > 0){ sel--; mark(); e.preventDefault(); }
+  } else if(e.key === 'Enter' && sel >= 0){
+    copyImage(results[sel]);
+  } else if(e.key === 'Escape'){ qEl.focus(); qEl.select(); }
+});
+
+$('#commercial').onchange = run;
+const esc = s => (s||'').replace(/[<>&]/g, c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+const strip = s => esc(s).replace(/\s+/g,' ').slice(0,60);
+</script>
+</body>
+</html>

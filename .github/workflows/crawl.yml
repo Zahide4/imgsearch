@@ -1,0 +1,67 @@
+name: crawl
+
+# Sharded parallel crawl. Each matrix job is a separate GitHub-hosted runner
+# with its OWN IP, which is the whole point: the per-host rate limit that
+# throttles one machine applies per-IP, so N runners give you ~N x throughput.
+#
+# Free for PUBLIC repositories (unlimited Actions minutes).
+# Private repos burn the 2,000 min/month free allowance instead.
+#
+# NOTE ON FAIR USE: this is legitimate as a bounded, occasional dataset build
+# for a project you actually publish. Running it as a permanent 24/7 crawl
+# farm is Actions abuse and will get the account flagged. Keep it to scheduled
+# or manual runs, keep shard counts sane, and stay polite to the sources.
+
+on:
+  workflow_dispatch:
+    inputs:
+      per_topic:
+        description: "images per (topic, source) pair"
+        default: "40"
+      shards:
+        description: "parallel runners (max 20 on free tier)"
+        default: "20"
+      sources:
+        description: "commons, openverse, or both"
+        default: "openverse,commons"
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330          # runners hard-stop at 360
+    strategy:
+      fail-fast: false            # one bad shard must not kill the rest
+      matrix:
+        shard: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install (crawl deps only, no torch)
+        run: pip install httpx Pillow huggingface_hub
+
+      - name: Crawl shard ${{ matrix.shard }}
+        env:
+          CRAWL_UA: ${{ secrets.CRAWL_UA }}
+          STORAGE_BACKEND: proxy    # display urls are derived, not stored
+        run: |
+          python ingest.py \
+            --shard ${{ matrix.shard }} \
+            --shards ${{ github.event.inputs.shards || 20 }} \
+            --per-topic ${{ github.event.inputs.per_topic || 40 }} \
+            --source "${{ github.event.inputs.sources || 'openverse,commons' }}" \
+            --per-host 6 \
+            --crawl-only
+
+      # Runners have no persistent disk, so the derivative archive and the
+      # metadata both have to leave before the job ends. One tarball per
+      # shard, not 300k individual files.
+      - name: Push shard archive to Hugging Face
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_REPO:  ${{ secrets.HF_REPO }}
+        run: python cloud_sync.py push --shard ${{ matrix.shard }}
