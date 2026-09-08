@@ -42,7 +42,15 @@
   .card:hover{transform:translateY(-2px);border-color:#454552}
   .card.sel{border-color:var(--accent);box-shadow:0 0 0 2px rgba(91,141,255,.3)}
   .card img{width:100%;height:100%;object-fit:cover;display:block;
+      opacity:0;transition:opacity .18s ease;
+
             background:var(--panel2)}
+  .card img.ready{opacity:1}
+  .card::after{content:'';position:absolute;inset:0;pointer-events:none;
+      background:linear-gradient(100deg,transparent 20%,rgba(255,255,255,.045) 40%,transparent 60%);
+      background-size:220% 100%;animation:sk 1.4s ease-in-out infinite;opacity:1;transition:opacity .2s}
+  .card.done::after{opacity:0;animation:none}
+  @keyframes sk{0%{background-position:130% 0}100%{background-position:-30% 0}}
   .card .info{position:absolute;inset:auto 0 0 0;padding:22px 10px 8px;
       background:linear-gradient(transparent,rgba(0,0,0,.93));
       opacity:0;transition:opacity .12s}
@@ -207,6 +215,14 @@ function render(){
     // 3. only then mark it unavailable
     const img = c.querySelector('img');
     img.dataset.stage = '0';
+    // Reveal only once the bytes actually decode. Until then the card is a
+    // skeleton, so a failed first attempt never renders as a broken-image
+    // icon with alt text -- the retry and origin fallback happen behind the
+    // placeholder and the image simply fades in when one of them lands.
+    // alt stays on the element for screen readers.
+    const reveal = () => { img.classList.add('ready'); c.classList.add('done'); };
+    if (img.complete && img.naturalWidth) reveal();
+    img.onload = reveal;
     img.onerror = () => {
       const r = results[i], stage = img.dataset.stage;
       if (stage === '0') {
@@ -229,7 +245,9 @@ function render(){
         img.fetchPriority = 'low';
         img.src = originOf(r.thumb);
       } else {
-        c.style.opacity = '.45';
+        c.classList.add('done');            // stop the shimmer
+        c.style.opacity = '.4';
+        img.remove();                       // no broken icon, no alt text
         c.title = 'Thumbnail unavailable (image proxy was rate-limited)';
       }
     };
@@ -256,15 +274,30 @@ function mark(){
 
 async function copyImage(r){
   try{
-    const response = await fetch(r.thumb);
+    // Use the URL that actually rendered. r.thumb is the proxy URL, and for
+    // any image recovered via the origin fallback that URL is exactly the one
+    // that 429'd -- so copying it failed on precisely the images the user
+    // could see on screen.
+    const el = outEl.querySelector(`.card[data-i="${results.indexOf(r)}"] img`);
+    const src = (el && el.currentSrc) || r.thumb;
+    let response = await fetch(src);
+    if(!response.ok && src !== r.thumb) response = await fetch(r.thumb);
     if(!response.ok) throw new Error('Image unavailable');
     const blob = await response.blob();
     // clipboard only accepts png, so transcode through a canvas
     const bmp = await createImageBitmap(blob);
-    const cv = Object.assign(document.createElement('canvas'),
-                             {width:bmp.width, height:bmp.height});
-    cv.getContext('2d').drawImage(bmp,0,0); bmp.close();
-    const png = await new Promise(res => cv.toBlob(res,'image/png'));
+    // Cap the clipboard image. An origin-fallback thumbnail is the full-size
+    // master -- one measured at 4794x2532, which transcodes to a 19 MB
+    // lossless PNG. Downscaling to 2048px longest side keeps it usable in
+    // Photoshop or Premiere without putting tens of megabytes on the
+    // clipboard for a single drag.
+    const MAX = 2048;
+    const scale = Math.min(1, MAX / Math.max(bmp.width, bmp.height));
+    const w = Math.max(1, Math.round(bmp.width * scale));
+    const h = Math.max(1, Math.round(bmp.height * scale));
+    const cv = Object.assign(document.createElement('canvas'), {width: w, height: h});
+    cv.getContext('2d').drawImage(bmp, 0, 0, w, h);
+    const png = await new Promise(res => cv.toBlob(res, 'image/png'));
     await navigator.clipboard.write([new ClipboardItem({'image/png': png})]);
     toast('Copied — ' + (r.creator ? r.license + ', ' + strip(r.creator) : r.license));
   }catch(e){ toast('Copy failed: ' + e.message); }
