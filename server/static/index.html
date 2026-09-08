@@ -240,14 +240,19 @@ body.searching .hero{max-height:0;opacity:0}
    canvas bands visibly when scaled up -- which is what made it look broken
    rather than ambient. The blur also lets the resolution stay low. */
 #aura{position:fixed;inset:-20%;width:140%;height:140%;z-index:0;
-  pointer-events:none;opacity:0;filter:blur(90px) saturate(130%);
-  transition:opacity 1.8s var(--ease)}
+  pointer-events:none;opacity:0;filter:blur(78px) saturate(135%);
+  transition:opacity 1.1s var(--ease),filter .8s var(--ease)}
+body.working #aura{filter:blur(64px) saturate(210%) brightness(1.2)}
 #aura.on{opacity:1}
 /* Vignette: keeps the centre near-black so text sits on the ground the
    colour ramp was measured against, while the warmth stays at the edges. */
 #aura-veil{position:fixed;inset:0;z-index:0;pointer-events:none;
   background:radial-gradient(ellipse 78% 62% at 50% 42%,
-    rgba(0,0,0,.86) 0%, rgba(0,0,0,.55) 45%, rgba(0,0,0,.12) 100%)}
+    rgba(0,0,0,.72) 0%, rgba(0,0,0,.42) 48%, rgba(0,0,0,.04) 100%);
+  opacity:1;transition:opacity .7s var(--ease)}
+/* Lift the veil while a query is out: the field is doing its most expressive
+   work exactly when the veil is hiding it. */
+body.working #aura-veil{opacity:.34}
 .wrap{position:relative;z-index:1}
 
 .stage{display:flex;flex-direction:column;align-items:center;justify-content:center;
@@ -725,59 +730,92 @@ $('#commercial').onchange = run;
 const esc = s => (s||'').replace(/[<>&"']/g, c=>({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'}[c]));
 const strip = s => esc(s).replace(/\s+/g,' ').slice(0,60);
 /* ---------------------------------------------------------------------------
-   Ambient field. Four soft lights drifting behind the page, drawn at quarter
-   resolution and scaled up -- the blur hides the resolution and the cost is
-   negligible. Energy rises while a search is in flight and settles after, so
-   the background reports state instead of just decorating.
+   Ambient field.
+
+   Seven lights on Lissajous paths with mutually irrational frequencies, so
+   the composition never repeats and never settles into a pattern the eye can
+   predict. Each carries its own hue that drifts continuously; the drift rate,
+   travel, brightness and saturation are all multiplied by `energy`.
+
+   At rest that reads as slow warm light. While a query is out, energy goes to
+   1 and the same field speeds up, spreads, saturates and starts cycling hue --
+   so the page looks like it is working rather than merely waiting.
    --------------------------------------------------------------------------- */
 (function aura(){
   const cv = document.getElementById('aura');
   if(!cv || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
-  const ctx = cv.getContext('2d');
-  const DPR = 0.16;                       // CSS blur does the smoothing
-  let w = 0, h = 0;
+  const ctx = cv.getContext('2d', {alpha:true});
+  const DPR = 0.22;
+  let w=0, h=0;
   const resize = () => {
     w = cv.width  = Math.max(1, Math.round(innerWidth  * 1.4 * DPR));
     h = cv.height = Math.max(1, Math.round(innerHeight * 1.4 * DPR));
   };
   resize();
-  if (typeof addEventListener === 'function') addEventListener('resize', resize);
+  if(typeof addEventListener === 'function') addEventListener('resize', resize);
 
+  // Frequencies deliberately share no small common multiple.
   const blobs = [
-    {x:.26,y:.28,r:.58,c:[214,182,146], p:0  },   // warm sand
-    {x:.76,y:.22,r:.50,c:[196,150,128], p:2.1},   // bronze
-    {x:.62,y:.78,r:.62,c:[168,158,178], p:4.2},   // cool grey, for depth
-    {x:.14,y:.74,r:.44,c:[226,206,178], p:1.2},   // cream
+    {hue: 28, fx:0.31, fy:0.23, px:0.0, py:1.7, r:0.60, rf:0.17},
+    {hue: 12, fx:0.19, fy:0.37, px:2.1, py:0.4, r:0.52, rf:0.23},
+    {hue:200, fx:0.41, fy:0.29, px:4.2, py:3.1, r:0.58, rf:0.13},
+    {hue: 44, fx:0.27, fy:0.43, px:1.2, py:5.0, r:0.46, rf:0.29},
+    {hue:280, fx:0.23, fy:0.19, px:3.6, py:2.2, r:0.54, rf:0.19},
+    {hue:170, fx:0.37, fy:0.31, px:5.1, py:4.4, r:0.50, rf:0.21},
+    {hue:340, fx:0.17, fy:0.41, px:0.8, py:6.0, r:0.44, rf:0.27},
   ];
-  let energy = 0, target = 0, t = 0;
-  globalThis.__auraEnergy = v => { target = v; };
-  // Palette travels slowly and never all the way, so the room shifts hue
-  // without the page appearing to change theme underneath the user.
+  blobs.forEach(b => { b.h = b.hue; b.target = null; });
+
+  let energy = 0, want = 0, t = 0, last = performance.now();
+  globalThis.__auraEnergy = v => { want = v; };
   globalThis.__auraTint = pal => {
-    blobs.forEach((b,i) => { b.to = pal[i % pal.length]; });
+    // Results steer the hue rather than replacing it, so the room shifts
+    // toward what is on screen without the page changing theme underneath.
+    pal.forEach((rgb,i) => {
+      const [r,g,bl] = rgb.map(c=>c/255);
+      const mx=Math.max(r,g,bl), mn=Math.min(r,g,bl), d=mx-mn;
+      let hue = 0;
+      if(d > 0.001){
+        hue = mx===r ? ((g-bl)/d + (g<bl?6:0)) : mx===g ? ((bl-r)/d + 2) : ((r-g)/d + 4);
+        hue *= 60;
+      }
+      const b = blobs[i % blobs.length];
+      if(d > 0.05) b.target = hue;
+    });
   };
 
-  const frame = () => {
-    energy += (target - energy) * 0.045;
-    t += 0.0016 + energy * 0.004;
+  const frame = now => {
+    const dt = Math.min(0.05, (now - last)/1000); last = now;
+    energy += (want - energy) * Math.min(1, dt * 2.6);
+    t += dt * (0.14 + energy * 0.62);            // the field speeds up when busy
+
     ctx.clearRect(0,0,w,h);
     ctx.globalCompositeOperation = 'lighter';
+    const spread = 0.19 + energy * 0.19;
+    const sat    = 48 + energy * 38;
+    const light  = 46 + energy * 12;
+    const alpha  = 0.24 + energy * 0.26;
+
     for(const b of blobs){
-      const drift = 0.055 + energy * 0.05;
-      const x = (b.x + Math.cos(t + b.p) * drift) * w;
-      const y = (b.y + Math.sin(t * 0.82 + b.p) * drift) * h;
-      const r = b.r * Math.max(w,h) * (1 + energy * 0.10);
-      const a = (0.15 + energy * 0.20);
-      if(b.to){ for(let k=0;k<3;k++) b.c[k] += (b.to[k]-b.c[k])*0.012; }
+      if(b.target != null){
+        let d = ((b.target - b.h + 540) % 360) - 180;   // shortest way round
+        b.h = (b.h + d * dt * 0.55 + 360) % 360;
+      }
+      b.h = (b.h + dt * (2 + energy * 26)) % 360;        // continuous drift
+      const x = (0.5 + Math.cos(t * b.fx * 6.2 + b.px) * spread) * w;
+      const y = (0.5 + Math.sin(t * b.fy * 6.2 + b.py) * spread) * h;
+      const pulse = 1 + Math.sin(t * b.rf * 6.2 + b.py) * (0.10 + energy * 0.16);
+      const r = b.r * Math.max(w,h) * pulse;
       const g = ctx.createRadialGradient(x,y,0,x,y,r);
-      g.addColorStop(0, `rgba(${b.c[0]|0},${b.c[1]|0},${b.c[2]|0},${a})`);
-      g.addColorStop(1, `rgba(${b.c[0]|0},${b.c[1]|0},${b.c[2]|0},0)`);
+      g.addColorStop(0,   `hsla(${b.h|0},${sat|0}%,${light|0}%,${alpha})`);
+      g.addColorStop(0.55,`hsla(${b.h|0},${sat|0}%,${light|0}%,${alpha*0.35})`);
+      g.addColorStop(1,   `hsla(${b.h|0},${sat|0}%,${light|0}%,0)`);
       ctx.fillStyle = g;
       ctx.fillRect(0,0,w,h);
     }
     requestAnimationFrame(frame);
   };
-  frame();
+  requestAnimationFrame(frame);
   requestAnimationFrame(() => cv.classList.add('on'));
 })();
 
