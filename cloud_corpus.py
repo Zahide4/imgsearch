@@ -217,7 +217,16 @@ async def run(args):
     pending_points = []
     staged_ids = set()
     start_time, pages, failed, empty = time.monotonic(), 0, 0, 0
-    sem = asyncio.Semaphore(3)
+    # Fetch concurrency, per worker. Measured on a 50-image page cycle:
+    # fetching was 6.7s of 15.7s at concurrency 3 -- the single largest block,
+    # and self-inflicted rather than imposed by any origin.
+    #
+    # Each runner has its own IP, so 6 is 6 per address, not 120. Stopping at
+    # 6 rather than 8 is deliberate: 20 workers x 4.3 img/s = 86/s already
+    # exceeds the 82.6/s Qdrant upsert ceiling measured against the free
+    # cluster, so anything higher just moves the queue from fetch to upsert
+    # while putting more load on a donated service.
+    sem = asyncio.Semaphore(int(os.getenv('FETCH_CONCURRENCY', '6')))
 
     def save():
         archive.flush()  # Don't advance durable cursor ahead of the archive.
@@ -283,7 +292,10 @@ async def run(args):
             if empty >= 10:
                 save()
                 raise RuntimeError('Ten batches failed to fetch: stopping instead of wasting the crawl')
-            await asyncio.sleep(1)  # Sequential, paced API requests per worker.
+            # Pacing for the Commons API. maxlag=5 already makes workers back
+            # off when replication lag rises, which is the protection that
+            # actually matters; this is a second, softer brake.
+            await asyncio.sleep(0.3)
         save()
     if done < args.target:
         raise RuntimeError(f'Checkpoint saved at {done}/{args.target}; rerun this build to resume')
