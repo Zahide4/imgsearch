@@ -29,7 +29,22 @@ from ingest import COMMONS, license_ok, _clean
 from push_qdrant import point_id, license_class
 
 UA = os.getenv('CRAWL_UA', 'ImgSearch/0.2 (https://github.com/Zahide4/imgsearch)')
-COLLECTION = os.getenv('QDRANT_COLLECTION', 'images')
+COLLECTION = os.getenv('QDRANT_COLLECTION', 'images-v2')
+SPARSE_MODEL = 'qdrant/bm25'
+
+
+def search_text(row):
+    """Compact lexical representation used by Qdrant's BM25 sparse index.
+
+    Deliberately excludes `creator`. Photographer names are not what anyone
+    searches an image library for, and indexing them means a query like
+    "williams" matches every photo by Phil Williams. It also dilutes IDF:
+    contributor names are high-cardinality tokens that crowd out real subject
+    terms in the sparse index.
+    """
+    return ' '.join(filter(None, (
+        row.get('title', ''), row.get('description', ''), row.get('tags', ''),
+    )))[:1400]
 
 
 def ranges(worker, workers):
@@ -158,7 +173,8 @@ async def run(args):
     torch.set_num_threads(args.threads)
     hf = HfApi(token=os.environ['HF_TOKEN'])
     repo = os.environ['HF_REPO']
-    qc = QdrantClient(url=os.environ['QDRANT_URL'], api_key=os.environ['QDRANT_API_KEY'], timeout=120)
+    qc = QdrantClient(url=os.environ['QDRANT_URL'], api_key=os.environ['QDRANT_API_KEY'],
+                      cloud_inference=True, timeout=120)
     for field, schema in [('build_id', models.PayloadSchemaType.KEYWORD), ('worker', models.PayloadSchemaType.INTEGER)]:
         qc.create_payload_index(COLLECTION, field, field_schema=schema, wait=True)
     flt = models.Filter(must=[models.FieldCondition(key='build_id', match=models.MatchValue(value=args.build)),
@@ -223,7 +239,12 @@ async def run(args):
                 points = []
                 for (row, _, webp), vec in zip(chunk, vectors):
                     row.update(build_id=args.build, worker=args.worker)
-                    points.append(models.PointStruct(id=point_id(row['image_id']), vector=vec.tolist(), payload=row))
+                    points.append(models.PointStruct(
+                        id=point_id(row['image_id']),
+                        vector={'image': vec.tolist(),
+                                'bm25': models.Document(text=search_text(row), model=SPARSE_MODEL)},
+                        payload=row,
+                    ))
                     archive.add(row, webp)
                 pending_points.extend(points)
                 staged_ids.update(p.id for p in points)

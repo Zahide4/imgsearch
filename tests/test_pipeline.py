@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 import httpx
 import ingest
-from cloud_corpus import metadata, params_for, ranges
+from cloud_corpus import metadata, params_for, ranges, search_text
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('search_app', ROOT / 'server/app.py')
@@ -37,6 +37,19 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(metadata(page, 'Ph'))
         page['imageinfo'][0]['extmetadata']['LicenseShortName']['value'] = 'CC BY-ND 4.0'
         self.assertIsNone(metadata(page))
+
+    def test_search_text_combines_discovery_fields(self):
+        text = search_text({'title': 'Saturn V', 'creator': 'NASA',
+                            'description': 'Launch vehicle', 'tags': 'Apollo'})
+        self.assertEqual(text, 'Saturn V Launch vehicle Apollo')
+
+    def test_search_text_excludes_creator(self):
+        """Photographer names are not search terms. Indexing them makes a
+        query like "williams" match every photo by Phil Williams, and floods
+        the sparse index with high-cardinality tokens that dilute IDF."""
+        text = search_text({'title': 'Bridge', 'creator': 'Phil Williams'})
+        self.assertNotIn('Williams', text)
+        self.assertEqual(text, 'Bridge')
 
     async def test_topic_discovery_uses_host_limiter(self):
         called = []
@@ -88,6 +101,8 @@ class SearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(again.json()['cached'])
         self.assertEqual(other.status_code,200)
         self.assertEqual(len(self.calls),2)
+        self.assertEqual(self.calls[0]['prefetch'][0].using, 'image')
+        self.assertEqual(self.calls[0]['prefetch'][1].using, 'bm25')
         self.assertIn('full_url',first.json()['results'][0])
         self.assertTrue(first.json()['results'][0]['thumb'].startswith('https://wsrv.nl/'))
 

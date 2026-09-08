@@ -16,6 +16,6 @@ services:
       - key: QDRANT_API_KEY
         sync: false
       - key: QDRANT_COLLECTION
-        value: images
+        value: images-v2
       - key: ORT_THREADS
         value: "1"

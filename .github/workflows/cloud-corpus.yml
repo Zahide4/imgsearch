@@ -29,6 +29,7 @@ jobs:
       HF_REPO: ${{ secrets.HF_REPO }}
       QDRANT_URL: ${{ secrets.QDRANT_URL }}
       QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+      QDRANT_COLLECTION: images-v2
       CRAWL_UA: ImgSearch/0.2 (https://github.com/Zahide4/imgsearch)
       PYTHONUNBUFFERED: '1'
       TOKENIZERS_PARALLELISM: 'false'

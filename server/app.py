@@ -20,7 +20,8 @@ from tokenizers import Tokenizer
 
 ROOT = Path(__file__).resolve().parent
 REPO, ONNX = 'Xenova/siglip-base-patch16-224', 'onnx/text_model_int8.onnx'
-COLLECTION = os.getenv('QDRANT_COLLECTION', 'images')
+COLLECTION = os.getenv('QDRANT_COLLECTION', 'images-v2')
+SPARSE_MODEL = 'qdrant/bm25'
 DIM, MAXLEN, PAD_ID = 768, 64, 1
 app = FastAPI(title='imgsearch')
 app.add_middleware(CORSMiddleware, allow_origins=['*'], allow_methods=['GET'], allow_headers=['*'])
@@ -55,7 +56,8 @@ async def startup():
     await asyncio.to_thread(load)
     S['lock'] = asyncio.Lock()
     if os.getenv('QDRANT_URL'):
-        S['qc'] = AsyncQdrantClient(url=os.environ['QDRANT_URL'], api_key=os.getenv('QDRANT_API_KEY'), timeout=20)
+        S['qc'] = AsyncQdrantClient(url=os.environ['QDRANT_URL'], api_key=os.getenv('QDRANT_API_KEY'),
+                                    cloud_inference=True, timeout=20)
 
 
 @app.on_event('shutdown')
@@ -117,12 +119,44 @@ async def search(request: Request, q: str = Query(..., max_length=300),
         vector = await asyncio.to_thread(embed, text)
     embedded = time.perf_counter()
     flt = models.Filter(must=[models.FieldCondition(key='license_class', match=models.MatchAny(any=list(licenses)))]) if licenses else None
+    candidates = max(100, limit * 2)
+    dense_prefetch = models.Prefetch(
+        query=vector, using='image', limit=candidates, filter=flt,
+        params=models.SearchParams(
+            hnsw_ef=128,
+            quantization=models.QuantizationSearchParams(rescore=True, oversampling=2.0),
+        ),
+    )
     try:
-        hits = (await S['qc'].query_points(COLLECTION, query=vector, limit=limit, with_payload=True,
-                query_filter=flt, search_params=models.SearchParams(hnsw_ef=128,
-                quantization=models.QuantizationSearchParams(rescore=True, oversampling=2.0)))).points
+        # The BM25 query vector is built by Qdrant Cloud inference. If that is
+        # rate-limited or unavailable, fall back to dense-only rather than
+        # failing the whole request: the semantic half needs no inference and
+        # is the primary ranking signal. Losing exact-name matching degrades
+        # results; returning 503 loses search entirely.
+        hits = (await S['qc'].query_points(
+            COLLECTION,
+            prefetch=[
+                dense_prefetch,
+                models.Prefetch(
+                    query=models.Document(text=text, model=SPARSE_MODEL),
+                    using='bm25', limit=candidates, filter=flt,
+                ),
+            ],
+            query=models.FusionQuery(fusion=models.Fusion.RRF),
+            limit=limit, with_payload=True,
+        )).points
     except Exception:
-        raise HTTPException(503, 'Search is temporarily unavailable. Please try again.')
+        try:
+            hits = (await S['qc'].query_points(
+                COLLECTION, query=vector, using='image', limit=limit,
+                with_payload=True, query_filter=flt,
+                params=models.SearchParams(
+                    hnsw_ef=128,
+                    quantization=models.QuantizationSearchParams(rescore=True, oversampling=2.0),
+                ),
+            )).points
+        except Exception:
+            raise HTTPException(503, 'Search is temporarily unavailable. Please try again.')
     end = time.perf_counter()
     data = {'results': [result_from(hit) for hit in hits], 'ms': round((end-start)*1000, 1),
             'timing': {'embed_ms': round((embedded-start)*1000, 1), 'ann_ms': round((end-embedded)*1000, 1)}}

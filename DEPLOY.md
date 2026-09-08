@@ -13,11 +13,16 @@ Use the **Build searchable cloud corpus** GitHub Actions workflow. Each worker:
 3. Fetches API-provided thumbnails, makes 384px WebP derivatives, and embeds them
    with the same `ViT-B-16-SigLIP / webli` image model as the existing corpus.
 4. Archives derivatives and license/source metadata as WebDataset tar files in
-   Hugging Face, then writes vectors into the existing Qdrant collection.
+   Hugging Face, then writes dense image vectors and BM25 title/creator/description/
+   tag vectors into the `images-v2` Qdrant collection.
 5. Saves restart cursors in the dataset. No corpus is downloaded to your Mac or Render.
 
 GitHub repository secrets: `HF_TOKEN`, `HF_REPO`, `QDRANT_URL`, `QDRANT_API_KEY`.
 These must never appear in committed files or workflow inputs.
+
+`hybrid_collection.py migrate` copies the older collection into `images-v2`
+directly inside Qdrant's APIs. It is idempotent and transfers no image files.
+Render and the workflow both select `images-v2` through `QDRANT_COLLECTION`.
 
 Start with 100 images per worker (400 total):
 
@@ -43,7 +48,10 @@ measured guarantee. Keep scalar int8 quantization with full-precision rescoring.
 Measure `/metrics`, `/telemetry`, collection health, and query latency as it grows.
 HF public dataset storage is best-effort; never assume unlimited archive space.
 
-The API keeps the trained 64-token padding, pad ID 1, and SigLIP canonicalization.
+The API fuses SigLIP image similarity with Qdrant BM25 using reciprocal-rank
+fusion. This keeps visual/conceptual searches while making names, identifiers,
+and technical terms discoverable. The API keeps the trained 64-token padding,
+pad ID 1, and SigLIP canonicalization.
 Do not shorten padding or substitute the failed four-bit text model for speed.
 The 512-entry embedding cache and 128-entry, 120-second result cache are bounded.
 The frontend cancels superseded searches and includes license filters in cache keys.
@@ -64,6 +72,8 @@ are not an end-to-end latency guarantee. Health: `/healthz`; corpus count:
 
 Source documentation:
 - https://qdrant.tech/documentation/cloud/create-cluster/
+- https://qdrant.tech/documentation/inference/inference-bm25/
+- https://qdrant.tech/documentation/search/hybrid-queries/
 - https://www.mediawiki.org/wiki/API:Allimages
 - https://www.mediawiki.org/wiki/API:Etiquette
 - https://huggingface.co/docs/hub/storage-limits
