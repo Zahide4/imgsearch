@@ -12,3 +12,6 @@ worker-data/
 # The scripts and the measured results are kept; the images are not.
 testdrive/thumbs/
 testdrive/origins.txt
+
+# Credentials. Never committed.
+.env

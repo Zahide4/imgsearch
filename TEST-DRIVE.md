@@ -323,11 +323,12 @@ Stemming is confirmed working: "medieval manuscript illumination" matches
 of this check compared substrings and reported that correct match as a failure,
 which is why it now compares term ids.
 
-**Still unverified, and it needs Qdrant credentials:** whether a client-side
-query vector retrieves correctly from the *existing* 435k rows, which were
-indexed through cloud inference. It does not block the 10M build, where
-everything is re-indexed either way, but it does matter if the current
-collection is to be kept.
+**Verified against the live 435k.** Five BM25-only probes, each run twice
+against the production collection -- once with `models.Document` (cloud
+inference) and once with `sparse.query` (computed here) -- returned the
+**identical top-5 ids every time**. The term ids hash the same, so vectors
+written by either route are interchangeable and the existing collection can
+move to a self-hosted instance with no reindexing.
 
 The API takes `LOCAL_SPARSE=1` to switch; it defaults to cloud inference so
 production is undisturbed until the index actually moves in Step D.
