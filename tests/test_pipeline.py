@@ -129,6 +129,42 @@ class SearchTests(unittest.IsolatedAsyncioTestCase):
         r=await self.client.get('/api/search',params={'q':'!!!'})
         self.assertEqual(r.json()['results'],[])
 
+class BucketUploads(unittest.TestCase):
+    """The derivative goes to our own bucket, and a failure must not cost the row."""
+
+    @staticmethod
+    def chunk(n=3):
+        return [({'image_id': f'commons:{i}'}, None, b'webp-bytes') for i in range(n)]
+
+    def test_no_bucket_configured_yields_no_urls(self):
+        with patch.object(cloud_corpus.storage, 'enabled', return_value=False):
+            self.assertEqual(cloud_corpus.upload_batch(self.chunk()), ['', '', ''])
+
+    def test_urls_come_back_in_the_order_they_went_in(self):
+        # zip() pairs these against rows positionally; reordering would attach
+        # each image's URL to a different image.
+        with patch.object(cloud_corpus.storage, 'enabled', return_value=True), \
+             patch.object(cloud_corpus.storage, 'put',
+                          side_effect=lambda i, d: f'https://cdn/{i}.webp'):
+            self.assertEqual(cloud_corpus.upload_batch(self.chunk()),
+                             ['https://cdn/commons:0.webp',
+                              'https://cdn/commons:1.webp',
+                              'https://cdn/commons:2.webp'])
+
+    def test_one_failed_upload_does_not_lose_the_others(self):
+        def flaky(image_id, data):
+            if image_id == 'commons:1':
+                raise OSError('bucket said no')
+            return f'https://cdn/{image_id}.webp'
+        with patch.object(cloud_corpus.storage, 'enabled', return_value=True), \
+             patch.object(cloud_corpus.storage, 'put', side_effect=flaky):
+            urls = cloud_corpus.upload_batch(self.chunk())
+        # The middle row keeps its place and simply has no CDN url; the API
+        # falls back to the proxy for it rather than the row being dropped.
+        self.assertEqual(urls, ['https://cdn/commons:0.webp', '',
+                                'https://cdn/commons:2.webp'])
+
+
 class HostLimiting(unittest.TestCase):
     """The fix ingest.py has had all along, finally in the cloud crawler.
 

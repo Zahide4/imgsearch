@@ -17,8 +17,10 @@ import tarfile
 import time
 import unicodedata
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 
 import sparse
+import storage
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit, urlparse
 
@@ -155,6 +157,32 @@ async def request(client, url, **kwargs):
 
 # Broken code, not broken data. These must never be mistaken for a bad image.
 BUG_TYPES = (NameError, AttributeError, ImportError)
+
+
+def upload_batch(chunk):
+    """Put a batch of derivatives in the bucket, in parallel, and never fail.
+
+    boto3 is synchronous, so uploading 16 images one at a time would add well
+    over a second per batch to a crawl already bound by politeness. A small
+    thread pool overlaps them.
+
+    An upload that fails returns an empty URL rather than raising. The row is
+    still worth indexing: `result_from` falls back to the proxy when `cdn` is
+    absent, so a bucket outage degrades serving rather than losing the crawl.
+    """
+    if not storage.enabled():
+        return [''] * len(chunk)
+
+    def one(entry):
+        row, _, webp = entry
+        try:
+            return storage.put(row['image_id'], webp)
+        except Exception as exc:
+            print(f"upload skipped {row.get('image_id')}: {type(exc).__name__}", flush=True)
+            return ''
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        return list(pool.map(one, chunk))
 
 
 class HostLimiter:
@@ -406,6 +434,16 @@ async def run(args):
                 points = []
                 for (row, _, _) in chunk:
                     row.update(build_id=args.build, worker=args.worker)
+                # The derivative goes to our own bucket, and the row carries the
+                # URL the browser will load it from. Without this the API falls
+                # back to a free public resizing proxy -- which is what produced
+                # every serving problem the prototype hit: broken images, slow
+                # museum loads, copy failures, and finally an IP block when we
+                # tried to warm it. It is the one architectural change in the
+                # 10M plan, and it costs $1.21/month at the 21.2 KB measured.
+                for row, url in zip((r for r, _, _ in chunk), upload_batch(chunk)):
+                    if url:
+                        row['cdn'] = url
                 # One pass over the tokenizer for the batch, not one per row.
                 sparse_vectors = sparse.documents(search_text(row) for row, _, _ in chunk)
                 for (row, _, webp), vec, bm25 in zip(chunk, vectors, sparse_vectors):

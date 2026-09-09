@@ -34,6 +34,16 @@ jobs:
       QDRANT_URL: ${{ secrets.QDRANT_URL }}
       QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
       QDRANT_COLLECTION: images-v2
+      # Derivatives go to our own bucket. Unset these and storage.py falls back
+      # to the public resizing proxy, which is exactly the dependency the 10M
+      # plan exists to remove -- so the crawl still works, but it is building
+      # a corpus that cannot be served at scale.
+      STORAGE_BACKEND: ${{ vars.STORAGE_BACKEND || 'proxy' }}
+      S3_ENDPOINT: ${{ vars.S3_ENDPOINT }}
+      S3_BUCKET: ${{ vars.S3_BUCKET }}
+      CDN_BASE: ${{ vars.CDN_BASE }}
+      S3_KEY: ${{ secrets.S3_KEY }}
+      S3_SECRET: ${{ secrets.S3_SECRET }}
       CRAWL_UA: ImgSearch/0.2 (https://github.com/Zahide4/imgsearch)
       PYTHONUNBUFFERED: '1'
       TOKENIZERS_PARALLELISM: 'false'

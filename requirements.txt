@@ -9,3 +9,4 @@ timm>=0.9
 transformers>=4.40
 fastapi>=0.110
 uvicorn[standard]>=0.29
+boto3>=1.34            # S3 for Backblaze B2 / Cloudflare R2
