@@ -355,6 +355,61 @@ that has to be understood before it is baked into 10M rows.
 
 ---
 
+## Steps D and F · RESULTS
+
+Measured 2026-09-09 on a Hetzner **CAX21** (4 vCPU, 7.7 GB, 75 GB), not the
+CAX31 the plan assumed. Total server cost for everything below: about EUR0.20.
+
+### D · what fits, and at what accuracy
+
+| | recall@10 | p99 | RAM at 10M | disk at 10M | box |
+|---|---|---|---|---|---|
+| int8 in RAM, rescore on | **99.8%** | 25.7 ms | 8.5 GB | 56 GB | CAX31 |
+| **int8 on disk, no rescore** | **95.2%** | **10.7 ms** | **5.0 GB** | **56 GB** | **CAX21** |
+| int8 on disk, rescore on | 99.8% | 774 ms (fails) | 5.0 GB | 56 GB | — |
+| binary, rescore on | 90.2% | 17.1 ms | 2.4 GB | 46 GB | CAX21 |
+| binary, rescore off | 65.4% | 15.7 ms | 2.4 GB | 46 GB | — |
+
+**Binary is dominated.** int8-on-disk sits on the same box at the same price
+with five points more recall and lower latency, so there is no configuration in
+which binary is the right answer here.
+
+Rescoring is what buys the last five points, and on disk it costs 70x the
+latency -- it reads full float32 vectors per candidate. In RAM it is nearly
+free. That is the entire int8-in-RAM versus int8-on-disk trade.
+
+### Two measurement traps, both of which produced wrong answers first
+
+**Total RSS is not the memory requirement.** Vectors are `on_disk`, so Qdrant
+mmaps the float32 originals and every cached page counts toward RSS -- 43% of
+it, measured. Scaling that to 10M reported **119 GB** for int8 and failed its
+own gate. `RssAnon` is the part that cannot be evicted: the real figure is
+about 8.5 GB.
+
+**Disk measured right after a bulk load counts unmerged segments.** Binary read
+4.11 GB that way and **1.96 GB** once the optimizer settled. That was the
+difference between "needs a volume" and "fits the cheap box".
+
+### F · the API on ARM, against local Qdrant
+
+| | Render x86 + Qdrant Cloud | this CAX21 |
+|---|---|---|
+| median total | 612 ms | **206 ms** |
+| median embed | 480 ms | **102.8 ms** |
+| median ann | 71 ms | 101.8 ms |
+
+**SigLIP text embedding is 4.7x faster on the Ampere cores than on Render's
+free tier**, which is throttled x86. Embedding was 80% of query time and is now
+half of a much smaller number. The gate was ARM embed under 800 ms; it is 103.
+
+One query in ten told the truth about the future: the first, cold, took
+1,397 ms of ANN time against ~100 ms for the rest. At 435k the whole dataset
+fits in page cache on a 7.7 GB box. **At 10M it will not**, so expect more
+queries to look like that first one. The measured latency here is an
+optimistic bound, not a forecast.
+
+---
+
 ## Step D · HOW TO RUN IT
 
 A **new** CAX31, not an existing one. Loading 435k vectors takes RAM and disk
