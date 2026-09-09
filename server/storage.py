@@ -78,7 +78,10 @@ def client():
                           # having it discarded, and paying a fresh TLS
                           # handshake on the next call. Measured effect: the
                           # GPU pass ran at 50 img/s instead of saturating.
-                          max_pool_connections=int(os.environ.get("S3_POOL", "64")),
+                          # Must be at least the thread count using it, or threads open a
+                          # connection, have it discarded as the pool overflows, and
+                          # pay a fresh handshake next call.
+                          max_pool_connections=int(os.environ.get("S3_POOL", "256")),
                           retries={"max_attempts": 5, "mode": "adaptive"}),
         )
     return _client
