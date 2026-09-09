@@ -86,6 +86,17 @@ def embed(text):
     return vec
 
 
+def sign(key):
+    """Turn a stored object key into a URL the client can fetch."""
+    try:
+        import storage
+        return storage.presigned_url(key)
+    except Exception:
+        # Signing failing must not empty the whole result set; the caller
+        # falls through to the proxy for this row.
+        return ''
+
+
 def sparse_query(text):
     """The BM25 half of the query, built here or by Qdrant Cloud."""
     if LOCAL_SPARSE:
@@ -98,6 +109,11 @@ def result_from(hit):
     p = hit.payload
     origin = p.get('thumb_origin', '')
     thumb = p.get('cdn', '')
+    # A private bucket stores the object key, not a URL -- an address with a
+    # signature in it cannot be written into the index, because it expires.
+    # Anything without a scheme is a key and gets signed on the way out.
+    if thumb and not thumb.startswith('http'):
+        thumb = sign(thumb)
     if not thumb and origin:
         thumb = 'https://wsrv.nl/?url=' + quote(origin, safe='') + '&w=384&h=384&fit=inside&output=webp&q=80&maxage=1y'
     return dict(id=p.get('image_id'), title=p.get('title', ''), creator=p.get('creator', ''),
