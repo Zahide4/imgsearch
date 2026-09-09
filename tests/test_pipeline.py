@@ -5,7 +5,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 import httpx
+import cloud_corpus
 import ingest
+
+
+async def _resolved(value):
+    """An awaitable that is already done, for stubbing httpx's async get."""
+    return value
 from cloud_corpus import clean_text, metadata, params_for, ranges, search_text
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -122,5 +128,114 @@ class SearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r.status_code,400)
         r=await self.client.get('/api/search',params={'q':'!!!'})
         self.assertEqual(r.json()['results'],[])
+
+class HostLimiting(unittest.TestCase):
+    """The fix ingest.py has had all along, finally in the cloud crawler.
+
+    Measured on 2,500 real origins: thumb.wikimedia.org 0 failures in 1,669,
+    upload.wikimedia.org 152 in 392, and 16 of 30 answering 429 at concurrency
+    six. One global semaphore cannot express that difference.
+    """
+
+    def test_each_host_gets_its_own_budget(self):
+        limiter = cloud_corpus.HostLimiter(per_host=6)
+        a = limiter.get("https://thumb.wikimedia.org/x.jpg")
+        b = limiter.get("https://images.metmuseum.org/y.jpg")
+        self.assertIsNot(a, b)
+        # Same host, same semaphore -- otherwise the limit means nothing.
+        self.assertIs(a, limiter.get("https://thumb.wikimedia.org/z.jpg"))
+
+    def test_the_origin_host_is_held_to_a_tighter_budget(self):
+        limiter = cloud_corpus.HostLimiter(per_host=6)
+        self.assertEqual(limiter.limit_for("https://upload.wikimedia.org/a.png"), 2)
+        self.assertEqual(limiter.limit_for("https://thumb.wikimedia.org/b.jpg"), 6)
+        self.assertLess(limiter.limit_for("https://upload.wikimedia.org/a.png"),
+                        limiter.limit_for("https://live.staticflickr.com/c.jpg"))
+
+    def test_a_429_does_not_hold_its_slot(self):
+        """Backing off inside the semaphore blocks every image queued behind it."""
+        calls, released = [], []
+
+        class Recorder:
+            def __init__(self, sem): self.sem = sem
+            async def __aenter__(self): calls.append("acquire"); return self
+            async def __aexit__(self, *a): released.append("release"); return False
+
+        limiter = cloud_corpus.HostLimiter()
+        limiter._sems["example.org"] = None
+        original = limiter.get
+        limiter.get = lambda url: Recorder(None)
+
+        class Response:
+            status_code = 429
+            headers = {"Retry-After": "0"}
+            content = b""
+            def raise_for_status(self): pass
+
+        class Client:
+            def __init__(self): self.n = 0
+            async def get(self, url, **kw):
+                self.n += 1
+                if self.n == 1:
+                    return Response()
+                ok = Response(); ok.status_code = 200
+                ok.content = b"not an image"
+                return ok
+
+        async def run():
+            return await cloud_corpus.fetch_image(
+                Client(), {"thumb_origin": "https://example.org/a.jpg", "image_id": "x"}, limiter)
+
+        asyncio.run(run())
+        # Two attempts, and the slot was given back between them.
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(released), 2)
+
+
+class ImageFetchResilience(unittest.IsolatedAsyncioTestCase):
+    """A worker crawls for hours; one bad file must not end that.
+
+    Worker 19 of the 500k build died at 2h25m on a single PNG whose text chunk
+    tripped Pillow's decompression guard. That guard raises a plain ValueError,
+    which the handler did not list, so it escaped and killed the shard.
+    """
+
+    @staticmethod
+    def client(content=b'not-an-image', status=200):
+        response = SimpleNamespace(content=content, status_code=status,
+                                   headers={}, raise_for_status=lambda: None)
+        return SimpleNamespace(get=lambda url, **kw: _resolved(response))
+
+    async def fetch(self, error):
+        row = {'image_id': 'commons:1', 'thumb_origin': 'https://example.org/a.png'}
+        with patch.object(cloud_corpus.Image, 'open', side_effect=error):
+            return await cloud_corpus.fetch_image(
+                self.client(), row, cloud_corpus.HostLimiter())
+
+    async def test_codec_failures_skip_the_image(self):
+        import struct, zlib
+        for error in (ValueError('Decompressed data too large for PngImagePlugin.MAX_TEXT_CHUNK'),
+                      zlib.error('invalid distance too far back'),
+                      struct.error('unpack requires a buffer of 4 bytes'),
+                      EOFError('truncated'),
+                      OSError('cannot identify image file')):
+            with self.subTest(error=type(error).__name__):
+                self.assertIsNone(await self.fetch(error))
+
+    async def test_undecodable_bytes_skip_the_image(self):
+        row = {'image_id': 'commons:2', 'thumb_origin': 'https://example.org/a.png'}
+        client = self.client(content=b'\x00\x01\x02 not an image')
+        self.assertIsNone(await cloud_corpus.fetch_image(client, row, cloud_corpus.HostLimiter()))
+
+    async def test_a_coding_mistake_is_never_mistaken_for_a_bad_image(self):
+        # The broad catch above must not resurrect the bug where a NameError
+        # from a missing import made discovery silently return nothing.
+        for error in (NameError("name 'urlparse' is not defined"),
+                      AttributeError('module has no attribute'),
+                      ImportError('no module named PIL')):
+            with self.subTest(error=type(error).__name__):
+                with self.assertRaises(type(error)):
+                    await self.fetch(error)
+
 
 if __name__=='__main__':unittest.main()

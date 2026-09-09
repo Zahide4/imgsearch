@@ -18,7 +18,7 @@ import time
 import unicodedata
 from collections import deque
 from pathlib import Path
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit, urlunsplit, urlparse
 
 import httpx
 import numpy as np
@@ -81,7 +81,15 @@ def params_for(start, end, continuation):
     params = dict(action='query', format='json', formatversion=2,
                   generator='allimages', gailimit=50, gaisort='name', gaifrom=start,
                   prop='imageinfo', iiprop='url|size|extmetadata|mime|sha1',
-                  iiurlwidth=800, maxlag=5)
+                  # 384, not 800, because 384 is what we store. MediaWiki only
+                  # renders a thumbnail when the source is WIDER than the width
+                  # asked for; below that it hands back the original, on
+                  # upload.wikimedia.org, which rate-limits far harder than the
+                  # thumbnail host. These files have a median width of 640px --
+                  # too narrow for an 800px thumbnail, ample for a 384px one.
+                  # Measured on 39 such files: at 800, 38 came back as
+                  # originals; at 384, only 9 did.
+                  iiurlwidth=384, maxlag=5)
     if end is not None:
         params['gaito'] = end
     params.update(continuation)  # retain gaifrom during imageinfo continuation
@@ -143,27 +151,110 @@ async def request(client, url, **kwargs):
     raise RuntimeError('Remote service remained unavailable after six attempts')
 
 
-async def fetch_image(client, row, sem):
-    async with sem:
+# Broken code, not broken data. These must never be mistaken for a bad image.
+BUG_TYPES = (NameError, AttributeError, ImportError)
+
+
+class HostLimiter:
+    """One semaphore per host, and a tighter one for the hosts that throttle.
+
+    `ingest.py` has had this since the 429 wall was first hit; the cloud
+    crawler never got it, and kept a single global semaphore. That is why the
+    500k run's per-worker error rates varied from 0 to 56 an hour with no
+    pattern in time: it is not time, it is which alphabet ranges a worker drew
+    and therefore how much of its traffic landed on one host.
+
+    Measured on 2,500 real origins from the live index:
+
+        thumb.wikimedia.org    1,669 fetched,   0 failures
+        upload.wikimedia.org     392 fetched, 152 failures (39%)
+
+    Those same URLs answer 200 when asked one at a time, and 429 for 16 of 30
+    at concurrency 6. MediaWiki serves pre-rendered thumbnails generously and
+    original files stingily -- reasonably, since originals cost it far more.
+
+    About 16% of the corpus lands on the original: `iiurlwidth=800` returns
+    `thumburl == url` for anything already narrower than 800px, so there is no
+    thumbnail to hand back. At 10M that is 1.6M requests to the strictest host,
+    which is why this cannot be left as it was.
+    """
+    DEFAULT = int(os.getenv('FETCH_CONCURRENCY', '6'))
+    TIGHT = {'upload.wikimedia.org': int(os.getenv('ORIGIN_CONCURRENCY', '2'))}
+
+    def __init__(self, per_host=None):
+        self.per_host = per_host or self.DEFAULT
+        self._sems = {}
+
+    def limit_for(self, url):
+        return self.TIGHT.get(urlparse(url).netloc, self.per_host)
+
+    def get(self, url):
+        host = urlparse(url).netloc or 'unknown'
+        if host not in self._sems:
+            self._sems[host] = asyncio.Semaphore(self.TIGHT.get(host, self.per_host))
+        return self._sems[host]
+
+
+async def fetch_image(client, row, limiter):
+    url = row['thumb_origin']
+    content = None
+    for attempt in range(5):
         try:
             # API-generated thumbnail only: never construct Wikimedia paths.
-            r = await request(client, row['thumb_origin'])
-            if len(r.content) > 15_000_000:
-                return None
-            with Image.open(io.BytesIO(r.content)) as source:
-                image = ImageOps.exif_transpose(source).convert('RGBA' if 'A' in source.getbands() else 'RGB')
-                image.thumbnail((384, 384), Image.Resampling.LANCZOS)
-                buf = io.BytesIO()
-                image.save(buf, 'WEBP', quality=80, method=4)
-                if image.mode == 'RGBA':
-                    rgb = Image.new('RGB', image.size, 'white')
-                    rgb.paste(image, mask=image.getchannel('A'))
-                else:
-                    rgb = image.convert('RGB')
-                return row, rgb, buf.getvalue()
-        except (httpx.HTTPError, OSError, RuntimeError, Image.DecompressionBombError) as exc:
-            print(f"fetch skipped {row['image_id']}: {type(exc).__name__}", flush=True)
+            async with limiter.get(url):
+                r = await client.get(url, timeout=60)
+            if r.status_code == 429 or r.status_code >= 500:
+                # Backing off INSIDE the semaphore holds a slot on the very
+                # host that just asked for less, and blocks every other image
+                # queued behind it. Wait outside, then queue again.
+                delay = min(float(r.headers.get('Retry-After', 2 ** (attempt + 1))), 120)
+                await asyncio.sleep(delay + random.random())
+                continue
+            r.raise_for_status()
+            content = r.content
+            break
+        except BUG_TYPES:
+            raise
+        except (httpx.TimeoutException, httpx.TransportError):
+            if attempt == 4:
+                break
+            await asyncio.sleep(2 ** attempt)
+        except Exception as exc:
+            print(f"fetch skipped {row.get('image_id')}: {type(exc).__name__}", flush=True)
             return None
+
+    if content is None:
+        print(f"fetch skipped {row.get('image_id')}: unavailable after retries", flush=True)
+        return None
+    if len(content) > 15_000_000:
+        return None
+
+    # Decoding is CPU work and holds no network slot.
+    try:
+        with Image.open(io.BytesIO(content)) as source:
+            image = ImageOps.exif_transpose(source).convert('RGBA' if 'A' in source.getbands() else 'RGB')
+            image.thumbnail((384, 384), Image.Resampling.LANCZOS)
+            buf = io.BytesIO()
+            image.save(buf, 'WEBP', quality=80, method=4)
+            if image.mode == 'RGBA':
+                rgb = Image.new('RGB', image.size, 'white')
+                rgb.paste(image, mask=image.getchannel('A'))
+            else:
+                rgb = image.convert('RGB')
+            return row, rgb, buf.getvalue()
+    except BUG_TYPES:
+        # A mistake inside this function would otherwise present as every
+        # image being corrupt -- the failure mode that once made discovery
+        # return nothing at all while looking healthy. Crash loudly instead.
+        raise
+    except Exception as exc:
+        # One malformed file must never take down a worker that has been
+        # crawling for hours; that is exactly how worker 19 died on a single
+        # PNG. Pillow raises whatever the codec raises -- ValueError from the
+        # oversized-text-chunk guard, zlib.error, struct.error, EOFError on a
+        # truncated stream -- so the catch is broad and the type is logged.
+        print(f"fetch skipped {row.get('image_id')}: {type(exc).__name__}", flush=True)
+        return None
 
 
 class Archive:
@@ -243,7 +334,7 @@ async def run(args):
     # exceeds the 82.6/s Qdrant upsert ceiling measured against the free
     # cluster, so anything higher just moves the queue from fetch to upsert
     # while putting more load on a donated service.
-    sem = asyncio.Semaphore(int(os.getenv('FETCH_CONCURRENCY', '6')))
+    limiter = HostLimiter()
 
     def save():
         # Archive first, so the durable cursor never runs ahead of the data.
@@ -299,7 +390,7 @@ async def run(args):
                 existing = qc.retrieve(COLLECTION, ids=[point_id(r['image_id']) for r in rows], with_payload=False, with_vectors=False)
                 seen = {str(p.id) for p in existing}
                 rows = [r for r in rows if point_id(r['image_id']) not in seen | staged_ids][:args.target - done]
-            loaded = [x for x in await asyncio.gather(*(fetch_image(client, row, sem) for row in rows)) if x]
+            loaded = [x for x in await asyncio.gather(*(fetch_image(client, row, limiter) for row in rows)) if x]
             failed += len(rows) - len(loaded)
             for i in range(0, len(loaded), args.batch):
                 chunk = loaded[i:i + args.batch]

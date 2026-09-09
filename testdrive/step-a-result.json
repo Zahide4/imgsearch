@@ -1,0 +1,20 @@
+{
+  "n": 2345,
+  "attempted": 2500,
+  "failure_rate_pct": 6.2,
+  "failures": {
+    "HTTPStatusError": 152,
+    "RemoteProtocolError": 3
+  },
+  "mean_kb": 21.2,
+  "p50_kb": 19.3,
+  "p90_kb": 36.8,
+  "p99_kb": 55.1,
+  "max_kb": 413.7,
+  "fetch_p50_s": 1.04,
+  "fetch_p90_s": 2.22,
+  "wall_clock_s": 472.8,
+  "throughput_img_s": 5.0,
+  "projected_10M_GB": 202.0,
+  "projected_10M_usd_month": 1.21
+}

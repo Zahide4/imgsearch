@@ -7,3 +7,8 @@ static_site/meta.json
 ingest_v1_backup.py
 .DS_Store
 worker-data/
+
+# Test-drive artifacts: the derivatives are 54MB of regenerable output.
+# The scripts and the measured results are kept; the images are not.
+testdrive/thumbs/
+testdrive/origins.txt
