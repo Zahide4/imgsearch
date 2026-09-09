@@ -41,6 +41,9 @@ jobs:
       STORAGE_BACKEND: ${{ vars.STORAGE_BACKEND || 'proxy' }}
       S3_ENDPOINT: ${{ vars.S3_ENDPOINT }}
       S3_BUCKET: ${{ vars.S3_BUCKET }}
+      # A private bucket costs nothing on Backblaze and needs no card.
+      # The row stores the object key; the API signs it per request.
+      S3_PRIVATE: ${{ vars.S3_PRIVATE }}
       CDN_BASE: ${{ vars.CDN_BASE }}
       S3_KEY: ${{ secrets.S3_KEY }}
       S3_SECRET: ${{ secrets.S3_SECRET }}
