@@ -366,12 +366,18 @@ async def run(args):
             return None
     queue = deque({'start': lo, 'end': hi, 'continue': {}} for lo, hi in ranges(args.worker, args.workers))
     done = 0
+    resume_seq = 0
     state = read_checkpoint()
     if state:
         queue = deque(state['queue'])
         # Crawl-only has no Qdrant to count, so progress rides in the
         # checkpoint that already carries the cursor.
         done = state.get('done', 0)
+        # And so does the shard counter. Restarting it at zero made a resumed
+        # worker overwrite its own earlier shards: 370 rows of manifest were
+        # replaced by 1,791, leaving 370 derivatives in the bucket that nothing
+        # referenced -- paid for, and invisible to the embedding pass.
+        resume_seq = state.get('manifest_seq', 0)
     if qc is not None:
         flt = models.Filter(must=[models.FieldCondition(key='build_id', match=models.MatchValue(value=args.build)),
                                   models.FieldCondition(key='worker', match=models.MatchValue(value=args.worker))])
@@ -393,7 +399,7 @@ async def run(args):
     archive = Archive(root, hf, repo)
     pending_points = []
     manifest_rows = []
-    manifest_seq = 0
+    manifest_seq = resume_seq
     staged_ids = set()
     start_time, pages, failed, empty = time.monotonic(), 0, 0, 0
     # Fetch concurrency, per worker. Measured on a 50-image page cycle:
@@ -431,8 +437,8 @@ async def run(args):
                 qc.upsert(COLLECTION, points=pending_points[i:i + 128], wait=True)
             pending_points.clear()
         staged_ids.clear()
-        state = json.dumps({'queue': list(queue), 'uploaded': done,
-                            'done': done, 'pages': pages}).encode()
+        state = json.dumps({'queue': list(queue), 'uploaded': done, 'done': done,
+                            'manifest_seq': manifest_seq, 'pages': pages}).encode()
         if args.no_embed:
             storage.client().put_object(Bucket=storage.BUCKET, Key=checkpoint,
                                         Body=state, ContentType='application/json')
