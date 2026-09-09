@@ -55,8 +55,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--build', required=True)
     ap.add_argument('--batch', type=int, default=0, help='0 = auto by device')
-    ap.add_argument('--loaders', type=int, default=32,
-                    help='threads fetching from the bucket; the GPU starves below ~16')
+    ap.add_argument('--loaders', type=int, default=128,
+                    help='threads fetching from the bucket. Each object takes '
+                         'roughly 0.4s to fetch, so throughput is loaders/0.4 '
+                         'until the GPU becomes the limit -- 32 capped it at '
+                         '76 img/s on a T4 that can do several hundred.')
     ap.add_argument('--force', action='store_true',
                     help='re-embed rows already in Qdrant. This is the path a '
                          'model change takes -- a pass over your own bucket '
@@ -112,9 +115,23 @@ def main():
             print(f"load skipped {row.get('image_id')}: {type(exc).__name__}", flush=True)
             return row, None
 
+    def fetch(rows):
+        return [(r, im) for r, im in pool.map(load, rows) if im is not None]
+
+    # Fetch the next batch while the GPU works on this one. Without it the two
+    # take turns: the GPU idles through a second of downloads, then the loaders
+    # idle through the forward pass, and the run costs the sum of both instead
+    # of the larger. The prefetcher gets its own thread so that waiting on it
+    # cannot occupy a worker in the pool it is waiting for.
+    prefetch = ThreadPoolExecutor(1)
+    batches = [todo[i:i + batch] for i in range(0, len(todo), batch)]
+    pending = prefetch.submit(fetch, batches[0]) if batches else None
+
     start, embedded = time.monotonic(), 0
-    for i in range(0, len(todo), batch):
-        loaded = [(r, im) for r, im in pool.map(load, todo[i:i + batch]) if im is not None]
+    for index, _ in enumerate(batches):
+        loaded = pending.result()
+        pending = (prefetch.submit(fetch, batches[index + 1])
+                   if index + 1 < len(batches) else None)
         if not loaded:
             continue
         tensors = torch.stack([preprocess(im) for _, im in loaded]).to(device)
