@@ -19,27 +19,42 @@ export QDRANT_STORAGE="${QDRANT_STORAGE:-$HOME/qdrant-storage}"
 
 say() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 
-say "installing docker and python"
-$SUDO apt-get update -qq
-$SUDO apt-get install -y -qq docker.io python3-pip >/dev/null
-
-say "starting qdrant"
-mkdir -p "$QDRANT_STORAGE"
-if ! $SUDO docker ps --format '{{.Names}}' | grep -q '^qdrant$'; then
-    $SUDO docker rm -f qdrant >/dev/null 2>&1 || true
-    $SUDO docker run -d --name qdrant -p 6333:6333 \
-        -v "$QDRANT_STORAGE":/qdrant/storage qdrant/qdrant:latest >/dev/null
+say "preparing qdrant"
+# No root assumed. Hetzner's image gives the `ubuntu` user no sudo rights at
+# all, so Docker is not installable -- but Qdrant ships a static binary, which
+# needs nothing but a directory to write to.
+if command -v docker >/dev/null && $SUDO -n true 2>/dev/null; then
+    mkdir -p "$QDRANT_STORAGE"
+    $SUDO docker ps --format '{{.Names}}' | grep -q '^qdrant$' || {
+        $SUDO docker rm -f qdrant >/dev/null 2>&1 || true
+        $SUDO docker run -d --name qdrant -p 6333:6333 \
+            -v "$QDRANT_STORAGE":/qdrant/storage qdrant/qdrant:latest >/dev/null
+    }
+else
+    if [ ! -x "$HOME/qdrant" ]; then
+        ARCH=$(uname -m)
+        VERSION=$(curl -sL https://api.github.com/repos/qdrant/qdrant/releases/latest \
+                  | grep -oE '"tag_name": "[^"]*"' | head -1 | cut -d'"' -f4)
+        curl -sL -o "$HOME/qdrant.tar.gz" \
+          "https://github.com/qdrant/qdrant/releases/download/${VERSION}/qdrant-${ARCH}-unknown-linux-musl.tar.gz"
+        tar xzf "$HOME/qdrant.tar.gz" -C "$HOME" && rm "$HOME/qdrant.tar.gz"
+        chmod +x "$HOME/qdrant"
+    fi
+    if ! pgrep -f "$HOME/qdrant" >/dev/null; then
+        mkdir -p "$QDRANT_STORAGE"
+        ( cd "$HOME" && QDRANT__STORAGE__STORAGE_PATH="$QDRANT_STORAGE" \
+          nohup "$HOME/qdrant" > "$HOME/qdrant.log" 2>&1 & )
+    fi
 fi
-# Wait for readiness rather than sleeping a guessed number of seconds.
-for _ in $(seq 1 60); do
-    curl -sf localhost:6333/healthz >/dev/null && break
-    sleep 1
-done
-curl -sf localhost:6333/healthz >/dev/null || { echo "qdrant did not come up"; exit 1; }
-echo "qdrant is up"
 
-pip3 install -q --break-system-packages qdrant-client 2>/dev/null \
-  || pip3 install -q qdrant-client
+export PATH="$HOME/.local/bin:$PATH"
+if ! python3 -c 'import qdrant_client' 2>/dev/null; then
+    python3 -m pip --version >/dev/null 2>&1 || {
+        curl -sS -o /tmp/get-pip.py https://bootstrap.pypa.io/get-pip.py
+        python3 /tmp/get-pip.py --user --break-system-packages -q
+    }
+    python3 -m pip install --user --break-system-packages -q qdrant-client
+fi
 
 say "pass 1 of 2: int8 -- the current configuration"
 python3 testdrive/migrate.py http://localhost:6333 int8
