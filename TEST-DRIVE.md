@@ -539,6 +539,51 @@ line moves.
 
 ---
 
+## Duplicates · MEASURED, and it is a real cost
+
+The plan lists this under open risks -- 365 scans of one manuscript in the
+prototype -- and nothing had measured it. 200 points sampled from the live
+435k, each queried against the whole corpus:
+
+| | |
+|---|---|
+| have a match at cosine >= 0.98 | **1.5%** |
+| have a match at cosine >= 0.95 | **11.5%** |
+| have five or more at >= 0.95 | 1.5% |
+| mean near-duplicates per image | 0.46 |
+| **exact duplicates by sha1** | **0** |
+
+Exact duplication is not the problem -- MediaWiki already dedupes uploads by
+hash. Near-duplication is, and it arrives in three distinct shapes:
+
+- **Scanned document runs.** `Mf00020956.jpg` has 20 neighbours above 0.95,
+  all named `Mf0002xxxx`. Microfilm pages: same paper, same lighting, different
+  words. Visually near-identical and individually useless.
+- **Template-designed print.** French sheet music covers from one publisher --
+  "Je bois dans mon Verre !", "Je n'ai plus d'amoureuse" -- share a cover
+  layout, so they collapse together in embedding space although the content
+  differs.
+- **Generic texture and background stock**, where "vélo" matches "stained" and
+  "gelombang". Different subjects, interchangeable images.
+
+**This is a lower bound for 10M.** The 435k corpus was built topic-first from
+481 curated seeds. The 10M plan discovers by *enumeration*, walking the whole
+namespace, which is precisely how scanned-document runs enter in bulk. Expect
+worse, not better.
+
+A title heuristic looking for series names found nothing, because these files
+vary in the middle (`Mf00020956` against `Mf00021058`) rather than in a
+trailing page number. Vector similarity is what caught them; filename patterns
+will not.
+
+**The cheap mitigation is at query time, not ingest.** Deduplicating 10M
+vectors against each other is an expensive offline pass; capping how many
+results may come from one near-duplicate cluster costs one pass over the
+twenty rows already being returned. Worth building into `server/app.py` before
+the corpus is large enough for it to matter.
+
+---
+
 ## What this still will not tell you
 
 Green on all six earns the $10 build and $16/month. It does not cover:

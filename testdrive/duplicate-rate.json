@@ -1,0 +1,10 @@
+{
+  "sampled": 200,
+  "corpus": 435540,
+  "pct_with_a_match_0.98": 1.5,
+  "pct_with_a_match_0.95": 11.5,
+  "pct_with_5plus_0.95": 1.5,
+  "mean_near_per_image": 0.455,
+  "exact_sha1_dupes": 0,
+  "title_series_clusters": 0
+}
