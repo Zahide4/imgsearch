@@ -108,8 +108,9 @@ while True:
 # not merged yet: binary read 4.11 GB that way and 1.96 GB once it settled.
 print('\n\nwaiting for the optimizer to settle before anything measures disk')
 for _ in range(120):
-    info = dst.get_collection(TARGET_COLLECTION)
-    if info.status == models.CollectionStatus.GREEN and not info.optimizer_status.ok is False:
+    # GREEN already means the optimizer has finished and the index is built;
+    # optimizer_status is a bare enum, not an object with an `ok` field.
+    if dst.get_collection(TARGET_COLLECTION).status == models.CollectionStatus.GREEN:
         break
     time.sleep(5)
 print(f'collection status: {dst.get_collection(TARGET_COLLECTION).status}')
