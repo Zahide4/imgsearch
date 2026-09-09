@@ -12,18 +12,23 @@ set -euo pipefail
 : "${QDRANT_URL:?set QDRANT_URL first}"
 : "${QDRANT_API_KEY:?set QDRANT_API_KEY first}"
 
+# Hetzner's Ubuntu images log you in as `ubuntu`, not root.
+SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo"
+# Storage under $HOME so the benchmark can measure its size without sudo.
+export QDRANT_STORAGE="${QDRANT_STORAGE:-$HOME/qdrant-storage}"
+
 say() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 
 say "installing docker and python"
-apt-get update -qq
-apt-get install -y -qq docker.io python3-pip >/dev/null
+$SUDO apt-get update -qq
+$SUDO apt-get install -y -qq docker.io python3-pip >/dev/null
 
 say "starting qdrant"
-mkdir -p /var/lib/qdrant/storage
-if ! docker ps --format '{{.Names}}' | grep -q '^qdrant$'; then
-    docker rm -f qdrant >/dev/null 2>&1 || true
-    docker run -d --name qdrant -p 6333:6333 \
-        -v /var/lib/qdrant/storage:/qdrant/storage qdrant/qdrant:latest >/dev/null
+mkdir -p "$QDRANT_STORAGE"
+if ! $SUDO docker ps --format '{{.Names}}' | grep -q '^qdrant$'; then
+    $SUDO docker rm -f qdrant >/dev/null 2>&1 || true
+    $SUDO docker run -d --name qdrant -p 6333:6333 \
+        -v "$QDRANT_STORAGE":/qdrant/storage qdrant/qdrant:latest >/dev/null
 fi
 # Wait for readiness rather than sleeping a guessed number of seconds.
 for _ in $(seq 1 60); do

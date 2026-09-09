@@ -25,8 +25,11 @@ scale = TARGET_CORPUS / count
 print(f'{COLLECTION}: {count:,} points, projecting x{scale:.1f} to 10M\n')
 
 
+STORAGE = os.getenv('QDRANT_STORAGE', os.path.expanduser('~/qdrant-storage'))
+
+
 def disk_bytes():
-    out = subprocess.run(['du', '-sb', '/var/lib/qdrant/storage'],
+    out = subprocess.run(['du', '-sb', STORAGE],
                          capture_output=True, text=True).stdout.split()
     return int(out[0]) if out else 0
 
