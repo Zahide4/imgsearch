@@ -72,6 +72,13 @@ def client():
             config=Config(signature_version="s3v4",
                           request_checksum_calculation="when_required",
                           response_checksum_validation="when_required",
+                          # botocore defaults this to 10. The embed pass fetches
+                          # with 32 threads and the crawler uploads with 8, so
+                          # the default left most threads opening a connection,
+                          # having it discarded, and paying a fresh TLS
+                          # handshake on the next call. Measured effect: the
+                          # GPU pass ran at 50 img/s instead of saturating.
+                          max_pool_connections=int(os.environ.get("S3_POOL", "64")),
                           retries={"max_attempts": 5, "mode": "adaptive"}),
         )
     return _client
