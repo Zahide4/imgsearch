@@ -10,6 +10,13 @@ on:
         description: Build identifier; reuse to resume
         default: pilot-v1
         required: true
+      no_embed:
+        description: >-
+          Crawl only -- derivatives to the bucket, metadata to a manifest, no
+          SigLIP and no Qdrant. Embedding then runs separately on a GPU. This
+          is the 10M shape; leave false to keep the coupled prototype path.
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -64,4 +71,7 @@ jobs:
           TARGET: ${{ inputs.target_per_worker }}
           BUILD: ${{ inputs.build }}
           WORKER: ${{ matrix.worker }}
-        run: python cloud_corpus.py --worker "$WORKER" --workers 20 --target "$TARGET" --build "$BUILD"
+        run: |
+          python cloud_corpus.py --worker "$WORKER" --workers 20 \
+            --target "$TARGET" --build "$BUILD" \
+            ${{ inputs.no_embed && '--no-embed' || '' }}

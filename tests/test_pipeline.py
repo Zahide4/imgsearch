@@ -1,5 +1,6 @@
 import asyncio
 import importlib.util
+import json
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -128,6 +129,44 @@ class SearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r.status_code,400)
         r=await self.client.get('/api/search',params={'q':'!!!'})
         self.assertEqual(r.json()['results'],[])
+
+class ManifestHandoff(unittest.TestCase):
+    """The crawl writes a manifest; the GPU pass reads it. That file is the
+    entire contract between two phases that now run hours apart."""
+
+    def test_manifest_lines_round_trip(self):
+        import embed_manifest
+        rows = [{'image_id': 'commons:1', 'cdn': 't/aa/bb/commons_1.webp', 'title': 'One'},
+                {'image_id': 'commons:2', 'cdn': 't/cc/dd/commons_2.webp', 'title': 'Two'}]
+        body = ('\n'.join(json.dumps(r) for r in rows) + '\n').encode()
+
+        class Body:
+            @staticmethod
+            def read(): return body
+
+        class Client:
+            @staticmethod
+            def get_object(**kw): return {'Body': Body}
+
+        with patch.object(embed_manifest.storage, 'client', return_value=Client):
+            self.assertEqual(list(embed_manifest.rows_from('manifest/b/00-00000.jsonl')), rows)
+
+    def test_a_blank_trailing_line_is_not_a_row(self):
+        # Every shard ends with a newline; a naive split would yield an empty
+        # row and the embed pass would try to fetch an image with no key.
+        import embed_manifest
+
+        class Body:
+            @staticmethod
+            def read(): return b'{"image_id": "commons:1"}\n\n'
+
+        class Client:
+            @staticmethod
+            def get_object(**kw): return {'Body': Body}
+
+        with patch.object(embed_manifest.storage, 'client', return_value=Client):
+            self.assertEqual(len(list(embed_manifest.rows_from('k'))), 1)
+
 
 class BucketUploads(unittest.TestCase):
     """The derivative goes to our own bucket, and a failure must not cost the row."""

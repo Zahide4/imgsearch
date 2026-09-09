@@ -323,38 +323,61 @@ class Archive:
 
 
 async def run(args):
-    import torch
-    import torch.nn.functional as F
-    import open_clip
-    torch.set_num_threads(args.threads)
+    # Crawling and embedding are separate phases. Coupled on a CI runner they
+    # ran at 1-2 img/s per worker, because every image waited on SigLIP on a
+    # shared CPU. Split, the crawl is bound only by how fast the sources will
+    # politely serve -- measured 5.4 img/s -- and embedding runs later at GPU
+    # speed over a bucket it can re-read as often as it likes. Changing model
+    # later becomes a GPU pass, not another crawl of the internet.
+    if not args.no_embed:
+        import torch
+        import torch.nn.functional as F
+        import open_clip
+        torch.set_num_threads(args.threads)
     hf = HfApi(token=os.environ['HF_TOKEN'])
     repo = os.environ['HF_REPO']
     # No cloud_inference: sparse vectors are built here, so this same code
     # works against a self-hosted instance, which has no inference service.
-    qc = QdrantClient(url=os.environ['QDRANT_URL'], api_key=os.environ['QDRANT_API_KEY'],
-                      timeout=120)
-    for field, schema in [('build_id', models.PayloadSchemaType.KEYWORD), ('worker', models.PayloadSchemaType.INTEGER)]:
-        qc.create_payload_index(COLLECTION, field, field_schema=schema, wait=True)
-    flt = models.Filter(must=[models.FieldCondition(key='build_id', match=models.MatchValue(value=args.build)),
-                             models.FieldCondition(key='worker', match=models.MatchValue(value=args.worker))])
-    done = qc.count(COLLECTION, count_filter=flt, exact=True).count
+    qc = None
+    if not args.no_embed:
+        qc = QdrantClient(url=os.environ['QDRANT_URL'], api_key=os.environ['QDRANT_API_KEY'],
+                          timeout=120)
+        for field, schema in [('build_id', models.PayloadSchemaType.KEYWORD), ('worker', models.PayloadSchemaType.INTEGER)]:
+            qc.create_payload_index(COLLECTION, field, field_schema=schema, wait=True)
     checkpoint = f'checkpoints/{args.build}-{args.workers}-{args.worker}.json'
     queue = deque({'start': lo, 'end': hi, 'continue': {}} for lo, hi in ranges(args.worker, args.workers))
+    done = 0
     try:
         saved = hf_hub_download(repo, checkpoint, repo_type='dataset', token=os.environ['HF_TOKEN'])
-        queue = deque(json.loads(Path(saved).read_text())['queue'])
+        state = json.loads(Path(saved).read_text())
+        queue = deque(state['queue'])
+        # Crawl-only has no Qdrant to count, so progress rides in the
+        # checkpoint that already carries the cursor.
+        done = state.get('done', 0)
     except EntryNotFoundError:
         pass
+    if qc is not None:
+        flt = models.Filter(must=[models.FieldCondition(key='build_id', match=models.MatchValue(value=args.build)),
+                                  models.FieldCondition(key='worker', match=models.MatchValue(value=args.worker))])
+        done = qc.count(COLLECTION, count_filter=flt, exact=True).count
     if done >= args.target:
         print(f'already complete: {done}/{args.target}', flush=True)
         return
-    print(f'loading SigLIP, worker {args.worker}, {done}/{args.target} already uploaded', flush=True)
-    model, _, preprocess = open_clip.create_model_and_transforms('ViT-B-16-SigLIP', pretrained='webli')
-    model.eval()
+    if args.no_embed:
+        if not storage.enabled():
+            raise SystemExit('--no-embed needs a bucket: set STORAGE_BACKEND=s3 and the S3_* vars')
+        print(f'crawl only, worker {args.worker}, {done}/{args.target} already written', flush=True)
+        model = preprocess = None
+    else:
+        print(f'loading SigLIP, worker {args.worker}, {done}/{args.target} already uploaded', flush=True)
+        model, _, preprocess = open_clip.create_model_and_transforms('ViT-B-16-SigLIP', pretrained='webli')
+        model.eval()
     root = Path('worker-data')
     root.mkdir(exist_ok=True)
     archive = Archive(root, hf, repo)
     pending_points = []
+    manifest_rows = []
+    manifest_seq = 0
     staged_ids = set()
     start_time, pages, failed, empty = time.monotonic(), 0, 0, 0
     # Fetch concurrency, per worker. Measured on a 50-image page cycle:
@@ -369,16 +392,31 @@ async def run(args):
     limiter = HostLimiter()
 
     def save():
-        # Archive first, so the durable cursor never runs ahead of the data.
+        nonlocal manifest_seq
+        # Data first, so the durable cursor never runs ahead of what it points at.
         ops = []
-        archive_op = archive.build()
-        if archive_op:
-            ops.append(archive_op)
-        for i in range(0, len(pending_points), 128):
-            qc.upsert(COLLECTION, points=pending_points[i:i + 128], wait=True)
-        pending_points.clear()
+        if args.no_embed:
+            # The manifest is the handoff. Each line is a finished row whose
+            # derivative is already in the bucket; the embedding pass reads
+            # these, fetches the images by key, and writes the vectors.
+            if manifest_rows:
+                body = ('\n'.join(json.dumps(r) for r in manifest_rows) + '\n').encode()
+                key = f'manifest/{args.build}/{args.worker:02d}-{manifest_seq:05d}.jsonl'
+                storage.client().put_object(Bucket=storage.BUCKET, Key=key, Body=body,
+                                            ContentType='application/x-ndjson')
+                print(f'manifest {key}: {len(manifest_rows)} rows', flush=True)
+                manifest_rows.clear()
+                manifest_seq += 1
+        else:
+            archive_op = archive.build()
+            if archive_op:
+                ops.append(archive_op)
+            for i in range(0, len(pending_points), 128):
+                qc.upsert(COLLECTION, points=pending_points[i:i + 128], wait=True)
+            pending_points.clear()
         staged_ids.clear()
-        state = json.dumps({'queue': list(queue), 'uploaded': done, 'pages': pages}).encode()
+        state = json.dumps({'queue': list(queue), 'uploaded': done,
+                            'done': done, 'pages': pages}).encode()
         ops.append(CommitOperationAdd(path_in_repo=checkpoint, path_or_fileobj=state))
 
         # A commit rate limit should pause a worker, not kill it. HF answers
@@ -424,6 +462,21 @@ async def run(args):
                 rows = [r for r in rows if point_id(r['image_id']) not in seen | staged_ids][:args.target - done]
             loaded = [x for x in await asyncio.gather(*(fetch_image(client, row, limiter) for row in rows)) if x]
             failed += len(rows) - len(loaded)
+            if args.no_embed:
+                for i in range(0, len(loaded), args.batch):
+                    chunk = loaded[i:i + args.batch]
+                    for (row, _, _) in chunk:
+                        row.update(build_id=args.build, worker=args.worker)
+                    for row, url in zip((r for r, _, _ in chunk), upload_batch(chunk)):
+                        if url:
+                            row['cdn'] = url
+                    # Only rows whose derivative actually reached the bucket:
+                    # the embedding pass has no other way to read the image.
+                    kept = [r for r, _, _ in chunk if r.get('cdn')]
+                    manifest_rows.extend(kept)
+                    staged_ids.update(point_id(r['image_id']) for r in kept)
+                    done += len(kept)
+                loaded = []
             for i in range(0, len(loaded), args.batch):
                 chunk = loaded[i:i + args.batch]
                 batch = torch.stack([preprocess(im) for _, im, _ in chunk])
@@ -493,6 +546,10 @@ if __name__ == '__main__':
     p.add_argument('--batch', type=int, default=16)
     p.add_argument('--threads', type=int, default=4)
     p.add_argument('--max-seconds', type=int, default=16200)
+    p.add_argument('--no-embed', action='store_true',
+                   help='crawl only: derivatives to the bucket, metadata to a '
+                        'manifest, no SigLIP and no Qdrant. Embedding then runs '
+                        'separately on a GPU reading from that bucket.')
     args = p.parse_args()
     if args.workers < 1 or not 0 <= args.worker < args.workers or args.target < 1:
         p.error('invalid worker/target configuration')
