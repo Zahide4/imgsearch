@@ -690,6 +690,41 @@ filter in the API, and tuning against real results.
 
 ---
 
+## Money controls · how $0 is actually enforced
+
+Nothing in this repo is trusted to protect the card. Backblaze is.
+
+**Caps are daily dollar limits, enforced server-side with a 403.** The Step E
+failure above was this mechanism working correctly on an account with no
+payment method. Set storage and Class A/B/C to the floor in Caps & Alerts and
+anything chargeable is refused rather than billed.
+
+**Class D is the only uncappable class, and it is Event Notification outbound
+calls only.** We do not use bucket event notifications. Do not enable them.
+
+**On pay-as-you-go, Class A/B/C calls are free.** There are exactly two ways to
+spend money on this account:
+
+| | free allowance | past it |
+|---|---|---|
+| storage | 10 GB | $6.95/TB/mo |
+| egress | 3x what you store | $0.01/GB |
+
+At 10M: 458 GB stored = **$3.18/mo**, and a full re-embedding pass reads 229 GB
+against a 1,374 GB free allowance, so passes are free. The build cannot be $0 —
+storage is inherent. The cap stays at the floor through testing and is raised
+deliberately, once, against a written-out number.
+
+**Edges, so nobody is surprised later:**
+
+- Cap changes take up to 10 minutes to apply; counters reset at midnight GMT.
+- A floor cap makes uploads fail the moment the corpus crosses 10 GB. That is
+  correct, and during a real crawl it will look exactly like a bug.
+- Check whether the UI accepts $0 or has a $1/day minimum. If the latter, $1/day
+  is the real floor, not zero.
+
+---
+
 ## What this still will not tell you
 
 Green on all six earns the $10 build and $16/month. It does not cover:
