@@ -584,6 +584,55 @@ the corpus is large enough for it to matter.
 
 ---
 
+## Content safety · REQUIRED BEFORE SHIPPING, not yet built
+
+The 435k corpus contains explicit sexual imagery, gore and graphic medical
+material. Wikimedia Commons is an educational repository with no content
+policy of the kind this product needs, and **enumeration makes the proportion
+worse**: the 435k came from 481 curated topics, while 10M walks the whole
+namespace and surfaces whatever Commons holds.
+
+This is a blocker rather than a polish item. Apple's guideline 1.1.4 requires
+filtering plus a reporting mechanism for apps serving user-generated or
+web-sourced content; the app has neither. And a designer searching "anatomy"
+for a client deck should not be shown what that query currently returns.
+
+**The design, cheapest layer first:**
+
+1. **Commons categories at crawl time.** `iiprop` already fetches
+   `extmetadata`; adding `categories` is nearly free and a blocklist catches
+   the flagrant cases *before* the image is downloaded, saving bandwidth and
+   bucket space. Coverage is inconsistent, so this is a bonus rather than a
+   foundation.
+
+2. **A safety score at embed time, using the model already loaded.** SigLIP
+   has a text tower, and the query path already uses it. Scoring each image
+   against a dozen cached prompt vectors -- "explicit sexual content",
+   "graphic injury", "medical anatomy", against neutral baselines -- is one
+   dot product per image, entirely in embedding space. No second model, no
+   extra download, negligible against GPU throughput. Broadly how LAION
+   filtered their datasets.
+
+3. **Filter at query time, not at ingest.** The score lives in the payload and
+   `server/app.py` excludes above a threshold by default. Changing the
+   threshold is then config, not a re-crawl, and an opt-in toggle stays
+   possible -- which matters, because medical and fine-art searches are
+   legitimate.
+
+**The existing 435k can be scored retroactively** with `embed_manifest.py
+--force`: a GPU pass over the bucket rather than another crawl.
+
+Two honest limits. No filter is clean -- classical nudes, medical
+illustration and Renaissance violence will trip it, and some genuinely
+explicit material will not. And the threshold is a product decision, not a
+technical one: a tool for commercial creative work should probably filter
+hard and let people opt back in.
+
+Roughly an hour of work: prompt scoring in the embed pass, a payload field, a
+filter in the API, and tuning against real results.
+
+---
+
 ## What this still will not tell you
 
 Green on all six earns the $10 build and $16/month. It does not cover:
