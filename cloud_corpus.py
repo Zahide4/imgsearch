@@ -489,6 +489,7 @@ async def run(args):
                 rows = [r for r in rows if point_id(r['image_id']) not in seen | staged_ids][:args.target - done]
             loaded = [x for x in await asyncio.gather(*(fetch_image(client, row, limiter) for row in rows)) if x]
             failed += len(rows) - len(loaded)
+            produced = 0
             if args.no_embed:
                 for i in range(0, len(loaded), args.batch):
                     chunk = loaded[i:i + args.batch]
@@ -503,6 +504,7 @@ async def run(args):
                     manifest_rows.extend(kept)
                     staged_ids.update(point_id(r['image_id']) for r in kept)
                     done += len(kept)
+                    produced += len(kept)
                 loaded = []
             for i in range(0, len(loaded), args.batch):
                 chunk = loaded[i:i + args.batch]
@@ -536,6 +538,7 @@ async def run(args):
                 pending_points.extend(points)
                 staged_ids.update(p.id for p in points)
                 done += len(points)
+                produced += len(points)
             queue.popleft()
             continuation = data.get('continue')
             if continuation:
@@ -544,7 +547,11 @@ async def run(args):
                 job['continue'] = continuation
                 queue.append(job)
             pages += 1
-            empty = empty + 1 if rows and not loaded else 0
+            # Ten pages that found rows and indexed none means something is
+            # broken upstream. It must count what the page PRODUCED, not what
+            # is left in `loaded`: crawl-only empties that list by design, so
+            # keying the check on it stopped every worker after ten pages.
+            empty = empty + 1 if rows and not produced else 0
             print(json.dumps({'worker': args.worker, 'uploaded': done, 'target': args.target,
                               'pages': pages, 'failed': failed, 'images_per_second': round(done / max(time.monotonic()-start_time, 1), 2)}), flush=True)
             # 128 commits/hour across the repo. One commit per save, 20
