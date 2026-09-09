@@ -41,12 +41,25 @@ if not BASELINE.exists():
     BASELINE.write_text(json.dumps({'rss_bytes': int(rss or 0)}))
     print(f"recorded empty-Qdrant baseline: {int(rss or 0)/2**30:.2f} GB")
 
-quantization = (
-    models.ScalarQuantization(scalar=models.ScalarQuantizationConfig(
-        type=models.ScalarType.INT8, quantile=0.99, always_ram=True))
-    if QUANT == 'int8' else
-    models.BinaryQuantization(binary=models.BinaryQuantizationConfig(always_ram=True))
-)
+# int8-disk keeps int8's accuracy but memory-maps the quantized vectors instead
+# of pinning them. RAM then holds little more than the HNSW graph, and the cost
+# is a disk read per candidate -- paid out of a latency budget that measured
+# 19 ms against a 700 ms gate.
+QUANTIZATIONS = {
+    'int8': models.ScalarQuantization(scalar=models.ScalarQuantizationConfig(
+        type=models.ScalarType.INT8, quantile=0.99, always_ram=True)),
+    'int8-disk': models.ScalarQuantization(scalar=models.ScalarQuantizationConfig(
+        type=models.ScalarType.INT8, quantile=0.99, always_ram=False)),
+    'binary': models.BinaryQuantization(binary=models.BinaryQuantizationConfig(
+        always_ram=True)),
+    'pq16': models.ProductQuantization(product=models.ProductQuantizationConfig(
+        compression=models.CompressionRatio.X16, always_ram=True)),
+    'pq8': models.ProductQuantization(product=models.ProductQuantizationConfig(
+        compression=models.CompressionRatio.X8, always_ram=True)),
+}
+if QUANT not in QUANTIZATIONS:
+    raise SystemExit(f'quantization must be one of {", ".join(QUANTIZATIONS)}')
+quantization = QUANTIZATIONS[QUANT]
 
 if not dst.collection_exists(TARGET_COLLECTION):
     dst.create_collection(
@@ -91,6 +104,15 @@ while True:
     if offset is None:
         break
 
-print(f'\n\nmoved {moved:,} points in {(time.monotonic()-start)/60:.1f} min')
+# Disk measured straight after a bulk load counts segments the optimizer has
+# not merged yet: binary read 4.11 GB that way and 1.96 GB once it settled.
+print('\n\nwaiting for the optimizer to settle before anything measures disk')
+for _ in range(120):
+    info = dst.get_collection(TARGET_COLLECTION)
+    if info.status == models.CollectionStatus.GREEN and not info.optimizer_status.ok is False:
+        break
+    time.sleep(5)
+print(f'collection status: {dst.get_collection(TARGET_COLLECTION).status}')
+print(f'\nmoved {moved:,} points in {(time.monotonic()-start)/60:.1f} min')
 print(f'upsert rate: {(moved-session_start)/max(time.monotonic()-start,1):.0f} pts/s '
       f'(free tier measured 82.6/s; gate is >200)')
