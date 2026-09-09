@@ -355,6 +355,77 @@ that has to be understood before it is baked into 10M rows.
 
 ---
 
+## Step D · HOW TO RUN IT
+
+A **new** CAX31, not an existing one. Loading 435k vectors takes RAM and disk
+from whatever else is on the box, and three hours costs €0.12.
+
+**On Hetzner:** create a server — CAX31 (Arm64), **Ubuntu 24.04**, location
+**Ashburn, VA**. Same region as the Qdrant cluster; anywhere else slows the
+copy and skews the latency numbers. Add your SSH key. Note the IP.
+
+**Then, on the box:**
+
+```bash
+ssh root@YOUR_IP
+
+apt-get update -qq && apt-get install -y -qq docker.io python3-pip git
+mkdir -p /var/lib/qdrant/storage
+docker run -d --name qdrant -p 6333:6333 \
+    -v /var/lib/qdrant/storage:/qdrant/storage qdrant/qdrant:latest
+sleep 10 && curl -s localhost:6333/healthz && echo " qdrant up"
+
+git clone -q https://github.com/Zahide4/imgsearch && cd imgsearch
+pip3 install -q --break-system-packages qdrant-client
+```
+
+Set the source credentials (paste your own values):
+
+```bash
+export QDRANT_URL='https://b0d52f1c-....us-east-2-0.aws.cloud.qdrant.io'
+export QDRANT_API_KEY='...'
+```
+
+**Pass 1 — int8**, the current configuration:
+
+```bash
+python3 testdrive/migrate.py http://localhost:6333 int8
+python3 testdrive/qdrant_bench.py http://localhost:6333 int8
+```
+
+Migration takes roughly 5-15 minutes for 435k. `migrate.py` records Qdrant's
+empty footprint first, because that baseline is a constant and scaling it to
+10M along with the data overstates the requirement by 23x.
+
+**Pass 2 — binary.** Drop the first collection so its memory is not counted
+against the second:
+
+```bash
+python3 -c "from qdrant_client import QdrantClient; \
+    QdrantClient(url='http://localhost:6333').delete_collection('images-int8')"
+python3 testdrive/migrate.py http://localhost:6333 binary
+python3 testdrive/qdrant_bench.py http://localhost:6333 binary
+```
+
+**Then send me both files and destroy the server:**
+
+```bash
+cat /tmp/step-d-int8.json /tmp/step-d-binary.json
+```
+
+Deleting the server in the Hetzner console is the last step and the one people
+forget. The risk here is not overspending on purpose, it is a box quietly
+billing EUR19.49 a month.
+
+### What the two passes decide
+
+Both fit a 16 GB box -- int8 projects to ~9 GB at 10M, binary to ~2.8 GB. So
+this is not about whether the CAX31 works. It is about whether a **CAX21 at
+roughly half the price** works, where 2.8 GB fits and 9 GB does not. If binary
+holds recall above 90% on proper nouns, the bill halves, permanently.
+
+---
+
 ## Step D · Qdrant fit on Hetzner — ~€0.10, 3 h, needs payment
 
 Two thirds of the monthly bill. Math is not a load test.

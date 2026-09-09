@@ -28,6 +28,18 @@ STATE = Path(f'/tmp/migrate-{QUANT}.json')
 src = QdrantClient(url=os.environ['QDRANT_URL'], api_key=os.environ['QDRANT_API_KEY'], timeout=120)
 dst = QdrantClient(url=TARGET_URL, timeout=120)
 
+# Qdrant's own footprint, before any data. Only the vectors and the graph grow
+# with the corpus; this does not. Scaling total RSS to 10M without subtracting
+# it first overstates the requirement badly -- by 23x this constant.
+import subprocess
+BASELINE = Path('/tmp/qdrant-baseline.json')
+if not BASELINE.exists():
+    rss = subprocess.run(['bash', '-c',
+        "ps -eo rss,comm | grep -i qdrant | awk '{s+=$1} END {print s*1024}'"],
+        capture_output=True, text=True).stdout.strip()
+    BASELINE.write_text(json.dumps({'rss_bytes': int(rss or 0)}))
+    print(f"recorded empty-Qdrant baseline: {int(rss or 0)/2**30:.2f} GB")
+
 quantization = (
     models.ScalarQuantization(scalar=models.ScalarQuantizationConfig(
         type=models.ScalarType.INT8, quantile=0.99, always_ram=True))

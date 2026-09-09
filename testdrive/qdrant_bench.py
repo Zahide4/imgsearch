@@ -39,8 +39,15 @@ def rss_bytes():
 
 
 ram, disk = rss_bytes(), disk_bytes()
-print(f'RAM  {ram/2**30:6.2f} GB  -> {ram*scale/2**30:6.2f} GB at 10M')
-print(f'disk {disk/2**30:6.2f} GB  -> {disk*scale/2**30:6.2f} GB at 10M\n')
+# Scale only what grows. Qdrant's baseline footprint is a constant, and
+# multiplying it by 23 along with everything else makes int8 look like it needs
+# 19.8 GB and does not fit a 16 GB box, when it actually needs about 9.
+baseline_path = Path('/tmp/qdrant-baseline.json')
+baseline = json.loads(baseline_path.read_text())['rss_bytes'] if baseline_path.exists() else 0
+ram_10m = baseline + (ram - baseline) * scale
+disk_10m = disk * scale
+print(f'RAM  {ram/2**30:6.2f} GB  (baseline {baseline/2**30:.2f} GB)  -> {ram_10m/2**30:6.2f} GB at 10M')
+print(f'disk {disk/2**30:6.2f} GB  -> {disk_10m/2**30:6.2f} GB at 10M\n')
 
 # Query vectors sampled from the corpus itself: a real embedding, not a random
 # one. Random 768-d vectors are near-orthogonal to everything and would make
@@ -79,17 +86,18 @@ for label, params in (
 
 report = {'collection': COLLECTION, 'quantization': QUANT, 'points': count,
           'ram_gb': round(ram/2**30, 2), 'disk_gb': round(disk/2**30, 2),
-          'projected_ram_gb_10M': round(ram*scale/2**30, 2),
-          'projected_disk_gb_10M': round(disk*scale/2**30, 2),
+          'baseline_gb': round(baseline/2**30, 2),
+          'projected_ram_gb_10M': round(ram_10m/2**30, 2),
+          'projected_disk_gb_10M': round(disk_10m/2**30, 2),
           'latency_recall': results}
 Path(f'/tmp/step-d-{QUANT}.json').write_text(json.dumps(report, indent=2))
 
 best = results['quantized, rescore on']
-ram10 = ram * scale / 2**30
+ram10 = ram_10m / 2**30
 print(f'\ngates')
 print(f"  RAM at 10M   < 11 GB   : {ram10:6.2f} GB  {'PASS' if ram10 < 11 else 'FAIL'}")
-print(f"  disk at 10M  < 100 GB  : {disk*scale/2**30:6.2f} GB  "
-      f"{'PASS' if disk*scale/2**30 < 100 else 'FAIL'}")
+print(f"  disk at 10M  < 100 GB  : {disk_10m/2**30:6.2f} GB  "
+      f"{'PASS' if disk_10m/2**30 < 100 else 'FAIL'}")
 print(f"  p99          < 700 ms  : {best['p99_ms']:6.1f} ms  "
       f"{'PASS' if best['p99_ms'] < 700 else 'FAIL'}")
 print(f"  recall@10    > 95%     : {best['recall_at_10']*100:5.1f}%  "
