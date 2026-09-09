@@ -1,0 +1,54 @@
+name: CPU embed benchmark
+
+# Answers one question: can a free GitHub runner embed as fast as it crawls?
+#
+# If it can, the coupled path returns and the project needs no object storage
+# at all -- the 229 GB that currently has to be parked between the crawl and a
+# GPU is the only reason there is a bucket, an egress bill, or a card.
+#
+# It has to run HERE rather than on a laptop: an M4 does CPU inference several
+# times faster than a 4-vCPU runner and would answer the wrong question.
+
+on:
+  workflow_dispatch:
+    inputs:
+      images:
+        description: Images to embed (192 is ~3 min per thread setting)
+        default: '192'
+        required: true
+      batch:
+        description: Forward-pass batch size
+        default: '16'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install (CPU wheels only)
+        run: |
+          python -m pip install -q --upgrade pip
+          # The CUDA wheels are ~2.5 GB and pointless on a runner with no GPU.
+          python -m pip install -q torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -q open_clip_torch pillow numpy
+      - name: Report the hardware being measured
+        run: |
+          nproc
+          grep -m1 'model name' /proc/cpuinfo || true
+          free -g | head -2
+      - name: Benchmark
+        run: |
+          python testdrive/cpu_embed_bench.py \
+            --images ${{ inputs.images }} --batch ${{ inputs.batch }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cpu-embed-bench
+          path: testdrive/cpu-embed-bench.json
