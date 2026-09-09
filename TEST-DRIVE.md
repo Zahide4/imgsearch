@@ -511,6 +511,63 @@ quantization is required to fit but drops recall below 90% on proper nouns.
 
 ---
 
+## Step E · RESULT: the measurements were invalid, and the design was wrong
+
+Three runs over the same 1,791-row manifest gave **50, 76 and 58 img/s** while
+loader concurrency went 32, 32, 128. Runs 1 and 2 had identical concurrency and
+differed by 50%, so this was never a response to the knob being turned.
+
+The fourth attempt — a fetch-only benchmark with the GPU taken out of the
+picture — answered it:
+
+```
+botocore.errorfactory.AccessDenied: Cannot download file, download bandwidth
+or transaction (Class B) cap exceeded.
+```
+
+**Backblaze's free tier allows 2,500 Class B (download) calls per day.** The
+three runs plus the bench spent about 5,800. Uploads are Class A and free
+without limit, which is exactly why the crawl never saw this and only the read
+path did. Every throughput number above was taken against a service that was
+metering us with an allowance we could not see, so none of them mean anything.
+
+The important finding is not the bad measurements, it is what they were
+measuring. **A full embedding pass read one object per image: 10,000,000 Class
+B calls at 10M.** That is 4,000x a free day, and even on a paid account it is
+10M round trips to move 22 KB each.
+
+`Archive` in `cloud_corpus.py` already wrote WebDataset tarballs — but only on
+the coupled path. `--no-embed` skipped it, as the comment at the flush site
+admitted: *"crawl-only never adds to the archive"*. Wiring it in:
+
+| | per-object | tarred @ 500 |
+|---|---|---|
+| Class B calls, full 10M pass | 10,000,000 | 20,000 |
+| read shape | 22 KB round trip | 11 MB sequential |
+| within free tier | no, by 4,000x | yes |
+
+The per-image objects still exist — the browser needs a URL per thumbnail — so
+storage roughly doubles: **229 GB → 458 GB, $1.59 → $3.18/mo on B2** at the
+22.4 KB mean derivative measured from the live bucket. The tars double as the
+re-embedding insurance the design already wanted: changing model becomes a
+sequential pass over 20,000 files instead of another crawl.
+
+The crawler writes the tar before the manifest that names it, and the manifest
+before the checkpoint, so a crash can orphan a shard but can never leave a
+manifest row pointing at a tar that was never written.
+
+**Still unmeasured:** actual img/s, because it cannot be measured honestly
+until the cap resets or the account has a payment method. The original no-go
+criterion below called this exactly — *"bucket egress is the bottleneck rather
+than the GPU"* — it just turned out to be the transaction cap rather than
+bandwidth.
+
+**Card note:** with a payment method B2 makes Class A/B/C free and the daily
+caps liftable. Serving needs this regardless — 2,500 reads/day is about 40
+searches. Set a spending cap of a few dollars.
+
+---
+
 ## Step E · Embed throughput — ~$1.20, 1 h, needs payment
 
 Proves the phases decouple: crawl writes to a bucket, embedding reads from it.

@@ -20,7 +20,8 @@ Free GPUs are enough: Kaggle gives 30 GPU-hours a week, Colab a T4.
 Resumable. Rows already present in Qdrant are skipped, so an interrupted run
 picks up where it stopped.
 """
-import argparse, io, json, os, time
+import argparse, io, json, os, tarfile, time
+from collections import OrderedDict, deque
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
@@ -55,11 +56,16 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--build', required=True)
     ap.add_argument('--batch', type=int, default=0, help='0 = auto by device')
-    ap.add_argument('--loaders', type=int, default=128,
-                    help='threads fetching from the bucket. Each object takes '
-                         'roughly 0.4s to fetch, so throughput is loaders/0.4 '
-                         'until the GPU becomes the limit -- 32 capped it at '
-                         '76 img/s on a T4 that can do several hundred.')
+    ap.add_argument('--loaders', type=int, default=8,
+                    help='shard downloads in flight. A shard is one tar of ~500 '
+                         'images, so this is not the knob it was when every '
+                         'image cost its own request -- 8 is already 8 x 11 MB '
+                         'in flight. Only rows from pre-shard builds still fetch '
+                         'per object, and those use this as a thread count.')
+    ap.add_argument('--lookahead', type=int, default=2,
+                    help='shards decoded ahead of the GPU. Each costs ~220 MB '
+                         'of decoded RGB, so this trades RAM for keeping the '
+                         'GPU fed.')
     ap.add_argument('--force', action='store_true',
                     help='re-embed rows already in Qdrant. This is the path a '
                          'model change takes -- a pass over your own bucket '
@@ -106,53 +112,99 @@ def main():
 
     pool = ThreadPoolExecutor(a.loaders)
 
-    def load(row):
-        """The derivative is already 384px WebP -- no resizing, just decode."""
+    def decode(row, data):
         try:
-            obj = storage.client().get_object(Bucket=storage.BUCKET, Key=row['cdn'])
-            return row, Image.open(io.BytesIO(obj['Body'].read())).convert('RGB')
+            return row, Image.open(io.BytesIO(data)).convert('RGB')
         except Exception as exc:
-            print(f"load skipped {row.get('image_id')}: {type(exc).__name__}", flush=True)
+            print(f"decode skipped {row.get('image_id')}: {type(exc).__name__}", flush=True)
             return row, None
 
-    def fetch(rows):
-        return [(r, im) for r, im in pool.map(load, rows) if im is not None]
+    def fetch_shard(key, rows):
+        """One GET for ~500 images. This is the whole point of the rewrite.
 
-    # Fetch the next batch while the GPU works on this one. Without it the two
-    # take turns: the GPU idles through a second of downloads, then the loaders
-    # idle through the forward pass, and the run costs the sum of both instead
-    # of the larger. The prefetcher gets its own thread so that waiting on it
-    # cannot occupy a worker in the pool it is waiting for.
-    prefetch = ThreadPoolExecutor(1)
-    batches = [todo[i:i + batch] for i in range(0, len(todo), batch)]
-    pending = prefetch.submit(fetch, batches[0]) if batches else None
+        Reading a derivative per image cost one Class B call per image; a full
+        10M pass was 10M of them, against a free-tier allowance of 2,500 a day.
+        """
+        body = storage.client().get_object(Bucket=storage.BUCKET, Key=key)['Body'].read()
+        members = {}
+        with tarfile.open(fileobj=io.BytesIO(body)) as tar:
+            for info in tar:
+                if info.name.endswith('.webp'):
+                    members[info.name] = tar.extractfile(info).read()
+        out = []
+        for row in rows:
+            data = members.get(point_id(row['image_id']) + '.webp')
+            if data is None:
+                print(f"missing from {key}: {row.get('image_id')}", flush=True)
+                continue
+            _, image = decode(row, data)
+            if image is not None:
+                out.append((row, image))
+        return out
+
+    def fetch_objects(_, rows):
+        """Pre-shard builds: one request per image, the way it used to be."""
+        def one(row):
+            try:
+                obj = storage.client().get_object(Bucket=storage.BUCKET, Key=row['cdn'])
+                return decode(row, obj['Body'].read())
+            except Exception as exc:
+                print(f"load skipped {row.get('image_id')}: {type(exc).__name__}", flush=True)
+                return row, None
+        return [(r, im) for r, im in pool.map(one, rows) if im is not None]
+
+    # Group by shard, preserving manifest order so a resumed run reads the
+    # bucket roughly sequentially rather than seeking all over it.
+    groups = OrderedDict()
+    for row in todo:
+        groups.setdefault(row.get('shard'), []).append(row)
+    work = list(groups.items())
+    sharded = sum(len(v) for k, v in work if k)
+    print(f'  {len(work):,} shards, {sharded:,}/{len(todo):,} rows tarred '
+          f'({len(todo) - sharded:,} pre-shard, fetched per object)\n', flush=True)
+
+    # Bounded look-ahead: fetch the next shards while the GPU works, without
+    # buffering the whole corpus into RAM.
+    fetchers = ThreadPoolExecutor(a.loaders)
+    queue, nxt = deque(), 0
+
+    def submit():
+        nonlocal nxt
+        if nxt < len(work):
+            key, rows = work[nxt]
+            queue.append(fetchers.submit(fetch_shard if key else fetch_objects, key, rows))
+            nxt += 1
+
+    for _ in range(max(a.lookahead, 1)):
+        submit()
 
     start, embedded = time.monotonic(), 0
-    for index, _ in enumerate(batches):
-        loaded = pending.result()
-        pending = (prefetch.submit(fetch, batches[index + 1])
-                   if index + 1 < len(batches) else None)
-        if not loaded:
-            continue
-        tensors = torch.stack([preprocess(im) for _, im in loaded]).to(device)
-        if device == 'cuda':
-            tensors = tensors.half()
-        with torch.inference_mode():
-            vectors = F.normalize(model.encode_image(tensors), dim=-1).float().cpu().numpy()
-        if not np.isfinite(vectors).all() or vectors.shape[1] != 768:
-            raise RuntimeError('Invalid image embeddings; refusing upload')
+    while queue:
+        loaded = queue.popleft().result()
+        submit()
+        for i in range(0, len(loaded), batch):
+            part = loaded[i:i + batch]
+            if not part:
+                continue
+            tensors = torch.stack([preprocess(im) for _, im in part]).to(device)
+            if device == 'cuda':
+                tensors = tensors.half()
+            with torch.inference_mode():
+                vectors = F.normalize(model.encode_image(tensors), dim=-1).float().cpu().numpy()
+            if not np.isfinite(vectors).all() or vectors.shape[1] != 768:
+                raise RuntimeError('Invalid image embeddings; refusing upload')
 
-        sparse_vectors = sparse.documents(search_text(r) for r, _ in loaded)
-        qc.upsert(COLLECTION, wait=True, points=[
-            models.PointStruct(id=point_id(row['image_id']),
-                               vector={'image': vec.tolist(), 'bm25': bm25},
-                               payload=row)
-            for (row, _), vec, bm25 in zip(loaded, vectors, sparse_vectors)])
+            sparse_vectors = sparse.documents(search_text(r) for r, _ in part)
+            qc.upsert(COLLECTION, wait=True, points=[
+                models.PointStruct(id=point_id(row['image_id']),
+                                   vector={'image': vec.tolist(), 'bm25': bm25},
+                                   payload=row)
+                for (row, _), vec, bm25 in zip(part, vectors, sparse_vectors)])
 
-        embedded += len(loaded)
-        rate = embedded / max(time.monotonic() - start, 1e-9)
-        print(f'\r  {embedded:,}/{len(todo):,}  {rate:6.0f} img/s  '
-              f'eta {(len(todo)-embedded)/max(rate,1e-9)/60:5.1f} min', end='', flush=True)
+            embedded += len(part)
+            rate = embedded / max(time.monotonic() - start, 1e-9)
+            print(f'\r  {embedded:,}/{len(todo):,}  {rate:6.0f} img/s  '
+                  f'eta {(len(todo)-embedded)/max(rate,1e-9)/60:5.1f} min', end='', flush=True)
 
     elapsed = time.monotonic() - start
     print(f'\n\nembedded {embedded:,} in {elapsed/60:.1f} min '

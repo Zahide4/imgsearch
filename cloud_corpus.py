@@ -321,6 +321,38 @@ class Archive:
         return CommitOperationAdd(path_in_repo=f'webdataset/{path.name}',
                                   path_or_fileobj=data)
 
+    def to_bucket(self, key):
+        """Write the pending images as one tar in the bucket. Returns the key.
+
+        Crawl-only cannot use the HuggingFace path above: at 20 workers
+        flushing every 500 rows that is ~780 commits/hour against a 128/hour
+        limit. The bucket has no commit ceiling.
+
+        The point of the tar is the READ side. Uploading a derivative per
+        image is free -- writes are Class A -- but reading them back one at a
+        time costs one Class B call per image, and a full embedding pass over
+        10M images is then 10M calls. Backblaze's free tier allows 2,500 a
+        day, and even paid this is 10M round trips of 22 KB each. Tarred at
+        500, the same pass is 20,000 sequential reads of 11 MB. The per-image
+        objects still exist for serving; this is what the GPU reads.
+        """
+        if not self.pending:
+            return None
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode='w') as tar:
+            for row, webp in self.pending:
+                name = point_id(row['image_id'])
+                for member, data in [(name + '.webp', webp),
+                                     (name + '.json', json.dumps(row).encode())]:
+                    info = tarfile.TarInfo(member)
+                    info.size = len(data)
+                    tar.addfile(info, io.BytesIO(data))
+        self.pending.clear()
+        storage.client().put_object(Bucket=storage.BUCKET, Key=key,
+                                    Body=buf.getvalue(),
+                                    ContentType='application/x-tar')
+        return key
+
 
 async def run(args):
     # Crawling and embedding are separate phases. Coupled on a CI runner they
@@ -422,6 +454,16 @@ async def run(args):
             # derivative is already in the bucket; the embedding pass reads
             # these, fetches the images by key, and writes the vectors.
             if manifest_rows:
+                # Tar first, then the manifest that names it, then the
+                # checkpoint. A crash can therefore orphan a shard, which
+                # costs storage and nothing else; it can never leave a
+                # manifest row pointing at a tar that was never written.
+                shard = f'shard/{args.build}/{args.worker:02d}-{manifest_seq:05d}.tar'
+                # Stamped before the tar is built so the copy of the row
+                # inside the archive matches the copy in the manifest.
+                for r in manifest_rows:
+                    r['shard'] = shard
+                archive.to_bucket(shard)
                 body = ('\n'.join(json.dumps(r) for r in manifest_rows) + '\n').encode()
                 key = f'manifest/{args.build}/{args.worker:02d}-{manifest_seq:05d}.jsonl'
                 storage.client().put_object(Bucket=storage.BUCKET, Key=key, Body=body,
@@ -506,7 +548,13 @@ async def run(args):
                             row['cdn'] = url
                     # Only rows whose derivative actually reached the bucket:
                     # the embedding pass has no other way to read the image.
-                    kept = [r for r, _, _ in chunk if r.get('cdn')]
+                    # Each kept image also goes into the shard tar, which is
+                    # what phase 2 actually reads -- see Archive.to_bucket.
+                    kept = []
+                    for row, _, webp in chunk:
+                        if row.get('cdn'):
+                            kept.append(row)
+                            archive.add(row, webp)
                     manifest_rows.extend(kept)
                     staged_ids.update(point_id(r['image_id']) for r in kept)
                     done += len(kept)
