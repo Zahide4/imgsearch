@@ -17,6 +17,8 @@ import tarfile
 import time
 import unicodedata
 from collections import deque
+
+import sparse
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit, urlparse
 
@@ -299,8 +301,10 @@ async def run(args):
     torch.set_num_threads(args.threads)
     hf = HfApi(token=os.environ['HF_TOKEN'])
     repo = os.environ['HF_REPO']
+    # No cloud_inference: sparse vectors are built here, so this same code
+    # works against a self-hosted instance, which has no inference service.
     qc = QdrantClient(url=os.environ['QDRANT_URL'], api_key=os.environ['QDRANT_API_KEY'],
-                      cloud_inference=True, timeout=120)
+                      timeout=120)
     for field, schema in [('build_id', models.PayloadSchemaType.KEYWORD), ('worker', models.PayloadSchemaType.INTEGER)]:
         qc.create_payload_index(COLLECTION, field, field_schema=schema, wait=True)
     flt = models.Filter(must=[models.FieldCondition(key='build_id', match=models.MatchValue(value=args.build)),
@@ -400,12 +404,14 @@ async def run(args):
                 if not np.isfinite(vectors).all() or vectors.shape[1] != 768:
                     raise RuntimeError('Invalid image embeddings; refusing upload')
                 points = []
-                for (row, _, webp), vec in zip(chunk, vectors):
+                for (row, _, _) in chunk:
                     row.update(build_id=args.build, worker=args.worker)
+                # One pass over the tokenizer for the batch, not one per row.
+                sparse_vectors = sparse.documents(search_text(row) for row, _, _ in chunk)
+                for (row, _, webp), vec, bm25 in zip(chunk, vectors, sparse_vectors):
                     points.append(models.PointStruct(
                         id=point_id(row['image_id']),
-                        vector={'image': vec.tolist(),
-                                'bm25': models.Document(text=search_text(row), model=SPARSE_MODEL)},
+                        vector={'image': vec.tolist(), 'bm25': bm25},
                         payload=row,
                     ))
                     archive.add(row, webp)

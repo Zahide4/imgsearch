@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parent
 REPO, ONNX = 'Xenova/siglip-base-patch16-224', 'onnx/text_model_int8.onnx'
 COLLECTION = os.getenv('QDRANT_COLLECTION', 'images-v2')
 SPARSE_MODEL = 'qdrant/bm25'
+LOCAL_SPARSE = os.getenv('LOCAL_SPARSE', '').lower() in ('1', 'true', 'yes')
 DIM, MAXLEN, PAD_ID = 768, 64, 1
 app = FastAPI(title='imgsearch')
 app.add_middleware(CORSMiddleware, allow_origins=['*'], allow_methods=['GET'], allow_headers=['*'])
@@ -56,8 +57,12 @@ async def startup():
     await asyncio.to_thread(load)
     S['lock'] = asyncio.Lock()
     if os.getenv('QDRANT_URL'):
+        # Cloud inference builds the sparse query on Qdrant's side and exists
+        # only on the managed service. Self-hosted has to build it here. The
+        # switch is an env var rather than a rewrite so production keeps its
+        # current path until the index actually moves.
         S['qc'] = AsyncQdrantClient(url=os.environ['QDRANT_URL'], api_key=os.getenv('QDRANT_API_KEY'),
-                                    cloud_inference=True, timeout=20)
+                                    cloud_inference=not LOCAL_SPARSE, timeout=20)
 
 
 @app.on_event('shutdown')
@@ -79,6 +84,14 @@ def embed(text):
     vec = (vec / norm).astype(np.float32).tolist()
     remember(S['cache'], text, vec, 512)
     return vec
+
+
+def sparse_query(text):
+    """The BM25 half of the query, built here or by Qdrant Cloud."""
+    if LOCAL_SPARSE:
+        import sparse
+        return sparse.query(text)
+    return models.Document(text=text, model=SPARSE_MODEL)
 
 
 def result_from(hit):
@@ -138,7 +151,7 @@ async def search(request: Request, q: str = Query(..., max_length=300),
             prefetch=[
                 dense_prefetch,
                 models.Prefetch(
-                    query=models.Document(text=text, model=SPARSE_MODEL),
+                    query=sparse_query(text),
                     using='bm25', limit=candidates, filter=flt,
                 ),
             ],

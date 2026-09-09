@@ -302,6 +302,38 @@ worker 19 two hours into the 500k run.
 
 ---
 
+## Step C · RESULT: GO
+
+`sparse.py` computes BM25 with `Qdrant/bm25` -- the same model the cloud was
+using, so term ids hash identically and vectors written by either route are
+interchangeable. Documents carry TF weights, queries are flat at 1.0, and the
+collection's `Modifier.IDF` means Qdrant still supplies inverse document
+frequency from its own statistics.
+
+Validated in an in-process Qdrant (`QdrantClient(':memory:')`) -- no server, no
+credentials, no cost -- by indexing 429 real corpus rows with
+`sparse.document` and querying with `sparse.query`. Four of five probes matched
+on every query term, and the fifth is explained: the test corpus was built by
+pulling 48 results each for 'locomotive', 'castle' and so on, which makes those
+words low-IDF *here*, so BM25 correctly prefers one rare term over two common
+ones. The algorithm is working; the corpus is skewed.
+
+Stemming is confirmed working: "medieval manuscript illumination" matches
+"Medieval goats illuminated manuscript" on all three terms. An earlier version
+of this check compared substrings and reported that correct match as a failure,
+which is why it now compares term ids.
+
+**Still unverified, and it needs Qdrant credentials:** whether a client-side
+query vector retrieves correctly from the *existing* 435k rows, which were
+indexed through cloud inference. It does not block the 10M build, where
+everything is re-indexed either way, but it does matter if the current
+collection is to be kept.
+
+The API takes `LOCAL_SPARSE=1` to switch; it defaults to cloud inference so
+production is undisturbed until the index actually moves in Step D.
+
+---
+
 ## Step C · Self-host BM25 — $0, 2 h
 
 Replace cloud inference with client-side sparse vectors, or Step D measures a

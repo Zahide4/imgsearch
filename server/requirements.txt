@@ -5,3 +5,4 @@ tokenizers>=0.15
 huggingface_hub>=0.23
 qdrant-client>=1.9
 numpy>=1.26
+fastembed>=0.4  # BM25 when LOCAL_SPARSE is set; ~10MB, no ONNX model
