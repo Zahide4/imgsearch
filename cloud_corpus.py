@@ -554,9 +554,17 @@ async def run(args):
             empty = empty + 1 if rows and not produced else 0
             print(json.dumps({'worker': args.worker, 'uploaded': done, 'target': args.target,
                               'pages': pages, 'failed': failed, 'images_per_second': round(done / max(time.monotonic()-start_time, 1), 2)}), flush=True)
-            # 128 commits/hour across the repo. One commit per save, 20
-            # workers, ~2 img/s each -> 4000 keeps the whole fleet near 36/hour.
-            if len(archive.pending) >= int(os.getenv('FLUSH_EVERY', '4000')):
+            # The coupled path flushes rarely because each save is a HuggingFace
+            # commit, and the repo allows 128 an hour: 4000 keeps twenty workers
+            # near 36/hour. Crawl-only writes to a bucket instead, which has no
+            # such ceiling, so it flushes far more often -- otherwise a worker
+            # that dies has uploaded derivatives nothing knows the names of.
+            #
+            # It also cannot key off `archive.pending`: crawl-only never adds to
+            # the archive, so that list stays empty and the flush would never
+            # fire at all. The manifest is what is pending here.
+            pending = len(manifest_rows) if args.no_embed else len(archive.pending)
+            if pending >= int(os.getenv('FLUSH_EVERY', '500' if args.no_embed else '4000')):
                 save()
             if empty >= 10:
                 save()
