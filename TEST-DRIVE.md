@@ -220,6 +220,51 @@ origin filtering, not just a bucket.
 
 ---
 
+## Step B · RESULT: GO, and the 24-hour test was never needed
+
+Two runs, 2026-09-09, both from a cold IP.
+
+**Pass 1 — the question the original plan wanted 24 hours for.**
+45 minutes, one stream, 6 per host: **8,650 fetched, 0 failed**, and the
+failure rate was 0.0% in every one of nine consecutive five-minute buckets.
+Throttling is not cumulative at this rate. Combined with the separate finding
+that bursts *are* punished and recover in about ten minutes, the picture is
+that sustained-polite works and bursts do not.
+
+Throughput was 3.20 img/s, which projects to 43 hours for 10M -- outside the
+plan's 11-30 h. Zero failures said the constraint was ours, not Wikimedia's:
+the loop discovered a page of 50 and only then started fetching it, so roughly
+7 seconds of every 15.6-second cycle had nothing downloading.
+
+**Pass 2 — three concurrent streams over a shared range queue**, 8 per host on
+`thumb.wikimedia.org`, `upload.wikimedia.org` still 2, the HostLimiter shared
+so total in-flight per host is unchanged. 30 minutes: **17,202 fetched, 0
+failed.**
+
+| interval | instantaneous |
+|---|---|
+| 0-1 min | 37.6 img/s |
+| 1-12 min | 13.4 img/s |
+| 12-20 min | 5.7 img/s |
+| 20-25 min | 5.1 img/s |
+| 25-30 min | **5.4 img/s** |
+
+**The sustained rate is ~5.4 img/s, not the 9.55 running mean.** A fast first
+minute inflates a cumulative average for the rest of the run, which is why the
+script now reports instantaneous rate per bucket and projects from the settled
+figure. That is 1.7x the baseline, 108 img/s across 20 IPs, and **10M in ~26
+hours** -- inside the 11-30 h band, at the top of it.
+
+Zero failures across 25,852 fetches in both passes combined.
+
+> A bug worth recording: pass 2's report crashed after the measurement
+> finished. `asyncio.run(main())` closes the event loop, and the HTTP client
+> was closed after that, on a loop that no longer existed. The numbers above
+> were recovered from the progress line. The client is now opened and closed
+> inside the loop that uses it.
+
+---
+
 ## Step B · Crawl politeness — $0, 6–24 h, no card
 
 The only phase that cannot be bought faster, and the one where the risk is

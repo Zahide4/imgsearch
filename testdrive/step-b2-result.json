@@ -1,0 +1,19 @@
+{
+  "seconds": 2701.3,
+  "pages": 219,
+  "fetched": 8650,
+  "failed": 0,
+  "img_per_s": 3.2,
+  "failure_pct": 0.0,
+  "strict_host_share_pct": 4.5,
+  "per_host": {
+    "thumb.wikimedia.org": {
+      "ok": 8262,
+      "failed": 0
+    },
+    "upload.wikimedia.org": {
+      "ok": 388,
+      "failed": 0
+    }
+  }
+}
