@@ -385,10 +385,36 @@ async def run(args):
 
     def read_checkpoint():
         if args.no_embed:
+            from botocore.exceptions import ClientError
             try:
                 body = storage.client().get_object(Bucket=storage.BUCKET, Key=checkpoint)
                 return json.loads(body['Body'].read())
-            except Exception:
+            except ClientError as exc:
+                # Absent means a fresh build; anything else must NOT be read as
+                # one. A cap-exceeded 403 looks exactly like a missing object
+                # to `except Exception`, and the worker would silently restart
+                # its range from zero -- reusing manifest_seq and overwriting
+                # the shards of the run it was supposed to resume.
+                code = exc.response.get('Error', {}).get('Code', '')
+                if code in ('NoSuchKey', 'NoSuchBucket', '404'):
+                    return None
+                # The read failed for a reason other than absence -- a download
+                # cap, most likely, since those are the calls that get capped.
+                # Listing is a different transaction class, so ask it instead:
+                # a build with no manifests has nothing to overwrite and is
+                # safe to start, whatever the checkpoint read did.
+                print(f'checkpoint unreadable ({code}); checking for prior '
+                      f'output by listing', flush=True)
+                pages = storage.client().get_paginator('list_objects_v2')
+                for page in pages.paginate(Bucket=storage.BUCKET,
+                                           Prefix=f'manifest/{args.build}/'):
+                    if page.get('Contents'):
+                        raise RuntimeError(
+                            f'Cannot read checkpoint {checkpoint} ({code}) and '
+                            f'build {args.build!r} already has manifests. '
+                            f'Refusing to start: resuming blind would reuse '
+                            f'manifest_seq and overwrite existing shards.') from exc
+                print(f'no manifests under {args.build!r}: safe fresh start', flush=True)
                 return None
         try:
             return json.loads(Path(hf_hub_download(
