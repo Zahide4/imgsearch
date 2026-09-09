@@ -334,8 +334,13 @@ async def run(args):
         import torch.nn.functional as F
         import open_clip
         torch.set_num_threads(args.threads)
-    hf = HfApi(token=os.environ['HF_TOKEN'])
-    repo = os.environ['HF_REPO']
+    # Crawl-only talks to exactly two things: Commons and the bucket. Its
+    # checkpoint lives in the bucket too, so this phase needs no HuggingFace
+    # token, no Qdrant credentials, and nothing that can rate-limit a commit.
+    hf = repo = None
+    if not args.no_embed:
+        hf = HfApi(token=os.environ['HF_TOKEN'])
+        repo = os.environ['HF_REPO']
     # No cloud_inference: sparse vectors are built here, so this same code
     # works against a self-hosted instance, which has no inference service.
     qc = None
@@ -345,17 +350,28 @@ async def run(args):
         for field, schema in [('build_id', models.PayloadSchemaType.KEYWORD), ('worker', models.PayloadSchemaType.INTEGER)]:
             qc.create_payload_index(COLLECTION, field, field_schema=schema, wait=True)
     checkpoint = f'checkpoints/{args.build}-{args.workers}-{args.worker}.json'
+
+    def read_checkpoint():
+        if args.no_embed:
+            try:
+                body = storage.client().get_object(Bucket=storage.BUCKET, Key=checkpoint)
+                return json.loads(body['Body'].read())
+            except Exception:
+                return None
+        try:
+            return json.loads(Path(hf_hub_download(
+                repo, checkpoint, repo_type='dataset',
+                token=os.environ['HF_TOKEN'])).read_text())
+        except EntryNotFoundError:
+            return None
     queue = deque({'start': lo, 'end': hi, 'continue': {}} for lo, hi in ranges(args.worker, args.workers))
     done = 0
-    try:
-        saved = hf_hub_download(repo, checkpoint, repo_type='dataset', token=os.environ['HF_TOKEN'])
-        state = json.loads(Path(saved).read_text())
+    state = read_checkpoint()
+    if state:
         queue = deque(state['queue'])
         # Crawl-only has no Qdrant to count, so progress rides in the
         # checkpoint that already carries the cursor.
         done = state.get('done', 0)
-    except EntryNotFoundError:
-        pass
     if qc is not None:
         flt = models.Filter(must=[models.FieldCondition(key='build_id', match=models.MatchValue(value=args.build)),
                                   models.FieldCondition(key='worker', match=models.MatchValue(value=args.worker))])
@@ -417,6 +433,10 @@ async def run(args):
         staged_ids.clear()
         state = json.dumps({'queue': list(queue), 'uploaded': done,
                             'done': done, 'pages': pages}).encode()
+        if args.no_embed:
+            storage.client().put_object(Bucket=storage.BUCKET, Key=checkpoint,
+                                        Body=state, ContentType='application/json')
+            return
         ops.append(CommitOperationAdd(path_in_repo=checkpoint, path_or_fileobj=state))
 
         # A commit rate limit should pause a worker, not kill it. HF answers
@@ -457,8 +477,15 @@ async def run(args):
             rows = [row for p in data.get('query', {}).get('pages', []) if (row := metadata(p, job['end']))]
             rows = list({row['image_id']: row for row in rows}.values())
             if rows:
-                existing = qc.retrieve(COLLECTION, ids=[point_id(r['image_id']) for r in rows], with_payload=False, with_vectors=False)
-                seen = {str(p.id) for p in existing}
+                # Crawl-only has nothing to ask: the embed pass skips rows
+                # already in Qdrant before it spends a GPU on them, so the
+                # check belongs there rather than in a phase that runs hours
+                # earlier and holds no database credentials.
+                seen = set()
+                if qc is not None:
+                    seen = {str(p.id) for p in qc.retrieve(
+                        COLLECTION, ids=[point_id(r['image_id']) for r in rows],
+                        with_payload=False, with_vectors=False)}
                 rows = [r for r in rows if point_id(r['image_id']) not in seen | staged_ids][:args.target - done]
             loaded = [x for x in await asyncio.gather(*(fetch_image(client, row, limiter) for row in rows)) if x]
             failed += len(rows) - len(loaded)
@@ -534,7 +561,11 @@ async def run(args):
         save()
     if done < args.target:
         raise RuntimeError(f'Checkpoint saved at {done}/{args.target}; rerun this build to resume')
-    print(f'COMPLETE: {done} images embedded, archived, and searchable in Qdrant', flush=True)
+    if args.no_embed:
+        print(f'COMPLETE: {done} images in the bucket, manifest written. '
+              f'Run embed_manifest.py --build {args.build} on a GPU next.', flush=True)
+    else:
+        print(f'COMPLETE: {done} images embedded, archived, and searchable in Qdrant', flush=True)
 
 
 if __name__ == '__main__':
