@@ -35,9 +35,24 @@ def disk_bytes():
 
 
 def rss_bytes():
+    """Anonymous resident memory -- what Qdrant genuinely needs.
+
+    Total RSS is the wrong number here and overstates the requirement badly.
+    Vectors are configured `on_disk`, so Qdrant mmaps the float32 originals and
+    every page the kernel happens to have cached counts toward RSS. Those pages
+    are evictable: they are page cache, bounded by the RAM available, not by
+    the size of the corpus. Measured mid-run, 43% of RSS was file-backed.
+
+    Scaling total RSS to 10M therefore multiplies the machine's page cache by
+    23 and reports that a corpus needs 119 GB when the resident requirement is
+    a fraction of that. RssAnon is the heap plus the `always_ram` quantized
+    vectors: the part that cannot be evicted and does scale with the corpus.
+    """
     out = subprocess.run(['bash', '-c',
-                          "ps -eo rss,comm | grep -i qdrant | awk '{s+=$1} END {print s*1024}'"],
-                         capture_output=True, text=True).stdout.strip()
+        "for p in $(pgrep -f qdrant); do "
+        "grep -h '^RssAnon' /proc/$p/status 2>/dev/null; done "
+        "| awk '{s+=$2} END {print s*1024}'"],
+        capture_output=True, text=True).stdout.strip()
     return int(out or 0)
 
 
@@ -49,7 +64,7 @@ baseline_path = Path('/tmp/qdrant-baseline.json')
 baseline = json.loads(baseline_path.read_text())['rss_bytes'] if baseline_path.exists() else 0
 ram_10m = baseline + (ram - baseline) * scale
 disk_10m = disk * scale
-print(f'RAM  {ram/2**30:6.2f} GB  (baseline {baseline/2**30:.2f} GB)  -> {ram_10m/2**30:6.2f} GB at 10M')
+print(f'RAM  {ram/2**30:6.2f} GB anon  (baseline {baseline/2**30:.2f} GB)  -> {ram_10m/2**30:6.2f} GB at 10M')
 print(f'disk {disk/2**30:6.2f} GB  -> {disk_10m/2**30:6.2f} GB at 10M\n')
 
 # Query vectors sampled from the corpus itself: a real embedding, not a random

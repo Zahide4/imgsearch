@@ -35,7 +35,8 @@ import subprocess
 BASELINE = Path('/tmp/qdrant-baseline.json')
 if not BASELINE.exists():
     rss = subprocess.run(['bash', '-c',
-        "ps -eo rss,comm | grep -i qdrant | awk '{s+=$1} END {print s*1024}'"],
+        "for p in $(pgrep -f qdrant); do grep -h '^RssAnon' /proc/$p/status "
+        "2>/dev/null; done | awk '{s+=$2} END {print s*1024}'"],
         capture_output=True, text=True).stdout.strip()
     BASELINE.write_text(json.dumps({'rss_bytes': int(rss or 0)}))
     print(f"recorded empty-Qdrant baseline: {int(rss or 0)/2**30:.2f} GB")
