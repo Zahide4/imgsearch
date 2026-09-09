@@ -57,6 +57,12 @@ def main():
     ap.add_argument('--batch', type=int, default=0, help='0 = auto by device')
     ap.add_argument('--loaders', type=int, default=32,
                     help='threads fetching from the bucket; the GPU starves below ~16')
+    ap.add_argument('--force', action='store_true',
+                    help='re-embed rows already in Qdrant. This is the path a '
+                         'model change takes -- a pass over your own bucket '
+                         'rather than another crawl of the internet -- and it '
+                         'is how throughput gets measured on a corpus that is '
+                         'already indexed. Upserts are idempotent by point id.')
     a = ap.parse_args()
 
     import torch
@@ -80,14 +86,18 @@ def main():
     rows = [r for key in manifests(a.build) for r in rows_from(key)]
     print(f'  {len(rows):,} rows in the manifest', flush=True)
 
-    # Resume: whatever is already in Qdrant does not need embedding again.
-    todo, ids = [], [point_id(r['image_id']) for r in rows]
-    for i in range(0, len(ids), 256):
-        chunk = rows[i:i + 256]
-        present = {str(p.id) for p in qc.retrieve(COLLECTION, ids=ids[i:i + 256],
-                                                  with_payload=False, with_vectors=False)}
-        todo.extend(r for r in chunk if point_id(r['image_id']) not in present)
-    print(f'  {len(todo):,} still to embed\n', flush=True)
+    if a.force:
+        todo = rows
+        print(f'  {len(todo):,} to re-embed (--force)\n', flush=True)
+    else:
+        # Resume: whatever is already in Qdrant does not need embedding again.
+        todo, ids = [], [point_id(r['image_id']) for r in rows]
+        for i in range(0, len(ids), 256):
+            chunk = rows[i:i + 256]
+            present = {str(p.id) for p in qc.retrieve(COLLECTION, ids=ids[i:i + 256],
+                                                      with_payload=False, with_vectors=False)}
+            todo.extend(r for r in chunk if point_id(r['image_id']) not in present)
+        print(f'  {len(todo):,} still to embed\n', flush=True)
     if not todo:
         return
 
