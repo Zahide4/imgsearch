@@ -25,7 +25,8 @@ import numpy as np
 from qdrant_client import QdrantClient, models
 
 import safety
-from cloud_corpus import COLLECTION
+import cloud_corpus
+COLLECTION = os.getenv('QDRANT_COLLECTION', cloud_corpus.COLLECTION)
 
 
 def main():
@@ -58,10 +59,20 @@ def main():
             # One operation per point: set_payload applies a single payload to
             # every id it is given, so distinct scores need distinct ops. They
             # still travel in one request.
+            # wait=True is not a detail. With wait=False this script fired
+            # 435k payload updates as fast as the network allowed, with no
+            # backpressure at all. Every set_payload creates a new point
+            # version, the optimizer could not compact them fast enough, and
+            # the writes filled the disk: 437,884 points became 1,271,480
+            # indexed vectors and the collection went red mid-run.
+            #
+            # Waiting makes the server the pacer. It is slower per call and it
+            # is the difference between a pass that finishes and a database
+            # that has to be rescued.
             qc.batch_update_points(COLLECTION, update_operations=[
                 models.SetPayloadOperation(set_payload=models.SetPayload(
                     payload=mark, points=[p.id]))
-                for p, mark in zip(points, marks)], wait=False)
+                for p, mark in zip(points, marks)], wait=True)
         flagged += int((np.array([m['safety'] for m in marks]) >= 0.005).sum())
         done += len(points)
         rate = done / max(time.monotonic() - start, 1e-9)
