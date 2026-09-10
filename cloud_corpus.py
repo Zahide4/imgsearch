@@ -73,14 +73,55 @@ def search_text(row):
     )))[:1400]
 
 
-def ranges(worker, workers):
-    # Hundreds of independent ranges distribute discovery across subjects,
-    # rather than taking 125k nearly identical names from one letter.
+def pending_count(args, manifest_rows, archive, pending_points):
+    # What save() would actually persist in this mode: manifest rows for
+    # crawl-only, un-upserted points for no-archive, tarball pendings for
+    # coupled+archive. Keying the flush off archive.pending in the modes
+    # that never fill it meant no-archive workers uploaded exactly once --
+    # at the very end -- so the indexed count never moved mid-run and a
+    # dead worker lost hours, not minutes.
+    if args.no_embed:
+        return len(manifest_rows)
+    if args.no_archive:
+        return len(pending_points)
+    return len(archive.pending)
+
+
+def flush_every(args):
+    default = '4000' if not args.no_embed and not args.no_archive else '500'
+    return int(os.getenv('FLUSH_EVERY', default))
+
+
+def shard_bounds():
+    # Filename/sortkey prefix shards shared by the allimages walker and the
+    # category walker: disjoint, shuffled once with a fixed seed so every
+    # worker derives the same assignment without coordination.
     starts = sorted(set([''] + list(string.digits + string.ascii_uppercase) +
                         [a + b for a in string.ascii_uppercase for b in string.ascii_lowercase]))
     all_ranges = list(zip(starts, starts[1:] + [None]))
     random.Random(20260908).shuffle(all_ranges)
-    return all_ranges[worker::workers]
+    return all_ranges
+
+
+def ranges(worker, workers):
+    # Hundreds of independent ranges distribute discovery across subjects,
+    # rather than taking 125k nearly identical names from one letter.
+    return shard_bounds()[worker::workers]
+
+
+def category_jobs(categories, worker, workers):
+    # One job per (category, sortkey-prefix shard) for a flat
+    # generator=categorymembers crawl (the Quality/Featured/Valued layer).
+    # Sortkeys default to file titles, so these shards partition category
+    # members the way ranges() partitions allimages -- with the same seam
+    # tolerance: dedupe by image_id absorbs overlaps, and the server-side
+    # gcmendsortkey bounds each shard (metadata() gets end=None because the
+    # bound is a sortkey, not a title). Strided assignment keeps every worker
+    # on every category, so a small category finishes across all workers
+    # instead of stalling on one.
+    all_jobs = [{'cat': cat, 'start': lo, 'end': hi, 'continue': {}}
+                for cat in categories for lo, hi in shard_bounds()]
+    return all_jobs[worker::workers]
 
 
 def params_for(start, end, continuation):
@@ -104,6 +145,27 @@ def params_for(start, end, continuation):
     # by the API, and Commons contains names in decomposed form, so echoing
     # one back verbatim eventually kills the worker. Two workers died this
     # way ~23 pages in.
+    return {k: unicodedata.normalize('NFC', v) if isinstance(v, str) else v
+            for k, v in params.items()}
+
+
+def params_for_category(cat, start, end, continuation):
+    # Flat category enumeration for the Quality/Featured/Valued layer.
+    # gcmtype=file keeps it to files (no subcategories, no recursion);
+    # sortkey order plus prefix bounds shard the category the way gaifrom/
+    # gaito shard allimages. Same imageinfo shape downstream, so metadata(),
+    # fetch, embed, safety and upsert are untouched. Empty start means from
+    # the very beginning; end None means to the very end.
+    params = dict(action='query', format='json', formatversion=2,
+                  generator='categorymembers', gcmtitle=cat, gcmtype='file',
+                  gcmlimit=50, gcmsort='sortkey',
+                  prop='imageinfo', iiprop='url|size|extmetadata|mime|sha1',
+                  iiurlwidth=384, maxlag=5)
+    if start:
+        params['gcmstartsortkey'] = start
+    if end is not None:
+        params['gcmendsortkey'] = end
+    params.update(continuation)  # retain sortkey position during imageinfo continuation
     return {k: unicodedata.normalize('NFC', v) if isinstance(v, str) else v
             for k, v in params.items()}
 
@@ -399,6 +461,7 @@ async def run(args):
                              ('safety', models.PayloadSchemaType.FLOAT)]:
             qc.create_payload_index(COLLECTION, field, field_schema=schema, wait=True)
     checkpoint_key = f'checkpoints/{args.build}-{args.workers}-{args.worker}.json'
+    categories = [c.strip() for c in (args.categories or '').split(',') if c.strip()]
 
     def read_checkpoint():
         if args.no_archive:
@@ -441,7 +504,8 @@ async def run(args):
                 token=os.environ['HF_TOKEN'])).read_text())
         except EntryNotFoundError:
             return None
-    queue = deque({'start': lo, 'end': hi, 'continue': {}} for lo, hi in ranges(args.worker, args.workers))
+    queue = deque(category_jobs(categories, args.worker, args.workers) if categories
+                  else ({'start': lo, 'end': hi, 'continue': {}} for lo, hi in ranges(args.worker, args.workers)))
     done = 0
     resume_seq = 0
     state = read_checkpoint()
@@ -462,6 +526,11 @@ async def run(args):
     if done >= args.target:
         print(f'already complete: {done}/{args.target}', flush=True)
         return
+    # Jobs queued is the worker's whole future: 0 here means it will skip
+    # everything and exit green within minutes (inherited an exhausted
+    # checkpoint, or a category with nothing in its shards). Loud now so a
+    # silent skip never again looks like a stall.
+    print(f'worker {args.worker}: {len(queue)} jobs queued, {done}/{args.target} indexed', flush=True)
     if args.no_embed:
         if not storage.enabled():
             raise SystemExit('--no-embed needs a bucket: set STORAGE_BACKEND=s3 and the S3_* vars')
@@ -560,7 +629,13 @@ async def run(args):
     async with httpx.AsyncClient(headers={'User-Agent': UA}, follow_redirects=True) as client:
         while queue and done < args.target and time.monotonic() - start_time < args.max_seconds:
             job = queue[0]
-            r = await request(client, COMMONS, params=params_for(job['start'], job['end'], job['continue']))
+            if 'cat' in job:
+                params = params_for_category(job['cat'], job['start'], job['end'], job['continue'])
+                end = None  # the shard bound is a sortkey, enforced server-side
+            else:
+                params = params_for(job['start'], job['end'], job['continue'])
+                end = job['end']
+            r = await request(client, COMMONS, params=params)
             data = r.json()
             if data.get('error'):
                 code = data['error'].get('code')
@@ -577,7 +652,7 @@ async def run(args):
                     save()
                     continue
                 raise RuntimeError(f"Commons API error: {code}")
-            rows = [row for p in data.get('query', {}).get('pages', []) if (row := metadata(p, job['end']))]
+            rows = [row for p in data.get('query', {}).get('pages', []) if (row := metadata(p, end))]
             rows = list({row['image_id']: row for row in rows}.values())
             if rows:
                 # Crawl-only has nothing to ask: the embed pass skips rows
@@ -672,17 +747,19 @@ async def run(args):
             empty = empty + 1 if rows and not produced else 0
             print(json.dumps({'worker': args.worker, 'uploaded': done, 'target': args.target,
                               'pages': pages, 'failed': failed, 'images_per_second': round(done / max(time.monotonic()-start_time, 1), 2)}), flush=True)
-            # The coupled path flushes rarely because each save is a HuggingFace
-            # commit, and the repo allows 128 an hour: 4000 keeps twenty workers
-            # near 36/hour. Crawl-only writes to a bucket instead, which has no
-            # such ceiling, so it flushes far more often -- otherwise a worker
-            # that dies has uploaded derivatives nothing knows the names of.
+            # Flush cadence follows the cost of save(), which differs by mode:
+            # coupled+archive saves through a HuggingFace commit against a
+            # 128/hour ceiling (4000 keeps twenty workers near 36/hour);
+            # crawl-only and no-archive save to a bucket / Qdrant with no
+            # ceiling, so they flush often -- otherwise a dead worker loses
+            # hours and, for no-archive, the indexed count never moves
+            # mid-run because pending_points only upsert inside save().
             #
-            # It also cannot key off `archive.pending`: crawl-only never adds to
-            # the archive, so that list stays empty and the flush would never
-            # fire at all. The manifest is what is pending here.
-            pending = len(manifest_rows) if args.no_embed else len(archive.pending)
-            if pending >= int(os.getenv('FLUSH_EVERY', '500' if args.no_embed else '4000')):
+            # It also cannot key off `archive.pending` in the modes that
+            # never fill it: crawl-only never adds to the archive, and
+            # no-archive skips add, so the flush would never fire at all.
+            # The pending thing is the manifest rows, or the points.
+            if pending_count(args, manifest_rows, archive, pending_points) >= flush_every(args):
                 save()
             if empty >= 10:
                 save()
@@ -715,6 +792,11 @@ if __name__ == '__main__':
     p.add_argument('--workers', type=int, default=4)
     p.add_argument('--target', type=int, required=True)
     p.add_argument('--build', default='commons-v1')
+    p.add_argument('--categories', default='',
+                   help='comma-separated Commons categories for a flat '
+                        'generator=categorymembers crawl (the Quality/Featured/'
+                        'Valued layer). Empty means the default filename-range '
+                        'allimages walk. Sharded by sortkey prefix across workers.')
     p.add_argument('--batch', type=int, default=16)
     # Measured on a GitHub runner (4 vCPU, AMD EPYC 7763): 2 threads
     # gave 4.8 img/s through SigLIP and 4 gave 4.2. More threads than

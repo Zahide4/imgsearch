@@ -1,0 +1,19 @@
+{
+  "date": "2026-09-10",
+  "rate_limit_endpoint": {"http": 200, "verified": true, "rate_limit_model": "standard"},
+  "page_13_probe": {
+    "query": "concrete texture",
+    "source": "flickr",
+    "licenses": "cc0,pdm,by",
+    "page_size": 20,
+    "http": 401,
+    "detail": "pagination depth may not exceed 240 for authenticated requests",
+    "burst": "100/min",
+    "sustained": "10000/day"
+  },
+  "page_size_probes": [
+    {"requested": 100, "http": 401, "detail": "page_size may not exceed 50 for authenticated requests"},
+    {"requested": 50, "http": 200, "returned": 50, "result_count": 240, "page_count": 4}
+  ],
+  "finding": "Authenticated request allowance and page size increase; per-query depth remains capped at 240. The current pilot keeps 20-row pages to preserve its checkpoints and sampling order."
+}

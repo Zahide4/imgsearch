@@ -34,6 +34,13 @@ on:
           worker that already has that many exits immediately.
         default: '500000'
         required: true
+      categories:
+        description: >-
+          Optional comma-separated Commons categories for a flat
+          generator=categorymembers crawl (the Quality/Featured/Valued
+          layer). Empty means the default filename-range allimages walk.
+        default: ''
+        required: false
       max_seconds:
         description: Wall clock per job, under the 6 h runner ceiling
         default: '16200'
@@ -115,6 +122,7 @@ jobs:
         env:
           TARGET: ${{ inputs.target_per_worker }}
           BUILD: ${{ inputs.build }}
+          CATEGORIES: ${{ inputs.categories }}
           MAX_SECONDS: ${{ inputs.max_seconds }}
           WORKER: ${{ matrix.worker }}
           WORKERS: ${{ inputs.workers }}
@@ -123,6 +131,7 @@ jobs:
           python cloud_corpus.py --no-archive \
             --worker "$WORKER" --workers "$WORKERS" \
             --target "$TARGET" --build "$BUILD" \
+            --categories "$CATEGORIES" \
             --threads 2 --max-seconds "$MAX_SECONDS"
           code=$?
           set -e

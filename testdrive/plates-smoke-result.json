@@ -1,0 +1,36 @@
+{
+  "pilot_id": "1499144d-a50a-4f11-820a-1c0271b31d51",
+  "generated_at": "2026-09-10T11:37:53.885859+00:00",
+  "status": "budget_paused",
+  "target": 10000,
+  "candidates": 79,
+  "sources": {
+    "flickr": {
+      "pages": 2,
+      "raw": 40,
+      "candidates": 40,
+      "duplicates": 0,
+      "rejected": {}
+    },
+    "rawpixel": {
+      "pages": 2,
+      "raw": 40,
+      "candidates": 39,
+      "duplicates": 0,
+      "rejected": {
+        "aspect": 1
+      }
+    }
+  },
+  "review_status": "not_reviewed",
+  "decision": "pending_human_review",
+  "http_statuses": {
+    "200": 4
+  },
+  "limitations": [
+    "Metadata sample; image bytes and true original resolution not verified.",
+    "Openverse provider URLs may be derivatives; source link required for original verification.",
+    "Metadata sensitivity filter only; no SigLIP safety or relevance scoring.",
+    "Exact source-asset dedup only; near-duplicates require human review."
+  ]
+}
