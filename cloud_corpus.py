@@ -693,7 +693,15 @@ async def run(args):
             await asyncio.sleep(0.3)
         save()
     if done < args.target:
-        raise RuntimeError(f'Checkpoint saved at {done}/{args.target}; rerun this build to resume')
+        # Not a failure. The worker ran out of wall clock before its quota and
+        # has saved its cursor; the next run resumes from there. A 10M build is
+        # six runs of twenty workers and MOST of those jobs end this way, so
+        # raising here painted 120 jobs red and would have buried the ones that
+        # broke for real. 75 is EX_TEMPFAIL -- "try again later" -- and the
+        # workflow treats it as a note rather than an error.
+        print(f'INCOMPLETE: {done}/{args.target} indexed, cursor saved. '
+              f'Rerun this build to resume.', flush=True)
+        raise SystemExit(75)
     if args.no_embed:
         print(f'COMPLETE: {done} images in the bucket, manifest written. '
               f'Run embed_manifest.py --build {args.build} on a GPU next.', flush=True)

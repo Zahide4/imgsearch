@@ -98,7 +98,19 @@ jobs:
           MAX_SECONDS: ${{ inputs.max_seconds }}
           WORKER: ${{ matrix.worker }}
         run: |
+          set +e
           python cloud_corpus.py --no-archive \
             --worker "$WORKER" --workers 20 \
             --target "$TARGET" --build "$BUILD" \
             --threads 2 --max-seconds "$MAX_SECONDS"
+          code=$?
+          set -e
+          # 75 (EX_TEMPFAIL) means the worker ran its window, saved its cursor,
+          # and has more to do. That is the normal ending for most jobs in a
+          # multi-run build -- treat it as a note so a red job always means
+          # something actually broke.
+          if [ "$code" = "75" ]; then
+            echo "::notice title=Resume needed::Worker $WORKER saved its cursor; rerun this build to continue"
+            exit 0
+          fi
+          exit "$code"
