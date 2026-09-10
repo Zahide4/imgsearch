@@ -73,6 +73,25 @@ def search_text(row):
     )))[:1400]
 
 
+def pending_count(args, manifest_rows, archive, pending_points):
+    # What save() would actually persist in this mode: manifest rows for
+    # crawl-only, un-upserted points for no-archive, tarball pendings for
+    # coupled+archive. Keying the flush off archive.pending in the modes
+    # that never fill it meant no-archive workers uploaded exactly once --
+    # at the very end -- so the indexed count never moved mid-run and a
+    # dead worker lost hours, not minutes.
+    if args.no_embed:
+        return len(manifest_rows)
+    if args.no_archive:
+        return len(pending_points)
+    return len(archive.pending)
+
+
+def flush_every(args):
+    default = '4000' if not args.no_embed and not args.no_archive else '500'
+    return int(os.getenv('FLUSH_EVERY', default))
+
+
 def shard_bounds():
     # Filename/sortkey prefix shards shared by the allimages walker and the
     # category walker: disjoint, shuffled once with a fixed seed so every
@@ -723,17 +742,19 @@ async def run(args):
             empty = empty + 1 if rows and not produced else 0
             print(json.dumps({'worker': args.worker, 'uploaded': done, 'target': args.target,
                               'pages': pages, 'failed': failed, 'images_per_second': round(done / max(time.monotonic()-start_time, 1), 2)}), flush=True)
-            # The coupled path flushes rarely because each save is a HuggingFace
-            # commit, and the repo allows 128 an hour: 4000 keeps twenty workers
-            # near 36/hour. Crawl-only writes to a bucket instead, which has no
-            # such ceiling, so it flushes far more often -- otherwise a worker
-            # that dies has uploaded derivatives nothing knows the names of.
+            # Flush cadence follows the cost of save(), which differs by mode:
+            # coupled+archive saves through a HuggingFace commit against a
+            # 128/hour ceiling (4000 keeps twenty workers near 36/hour);
+            # crawl-only and no-archive save to a bucket / Qdrant with no
+            # ceiling, so they flush often -- otherwise a dead worker loses
+            # hours and, for no-archive, the indexed count never moves
+            # mid-run because pending_points only upsert inside save().
             #
-            # It also cannot key off `archive.pending`: crawl-only never adds to
-            # the archive, so that list stays empty and the flush would never
-            # fire at all. The manifest is what is pending here.
-            pending = len(manifest_rows) if args.no_embed else len(archive.pending)
-            if pending >= int(os.getenv('FLUSH_EVERY', '500' if args.no_embed else '4000')):
+            # It also cannot key off `archive.pending` in the modes that
+            # never fill it: crawl-only never adds to the archive, and
+            # no-archive skips add, so the flush would never fire at all.
+            # The pending thing is the manifest rows, or the points.
+            if pending_count(args, manifest_rows, archive, pending_points) >= flush_every(args):
                 save()
             if empty >= 10:
                 save()

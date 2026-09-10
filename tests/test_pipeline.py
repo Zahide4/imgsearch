@@ -14,7 +14,7 @@ async def _resolved(value):
     """An awaitable that is already done, for stubbing httpx's async get."""
     return value
 from cloud_corpus import clean_text, metadata, params_for, ranges, search_text
-from cloud_corpus import category_jobs, params_for_category, shard_bounds
+from cloud_corpus import category_jobs, flush_every, params_for_category, pending_count, shard_bounds
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('search_app', ROOT / 'server/app.py')
@@ -62,6 +62,27 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         edge = params_for_category('Category:Quality images', '', None, {})
         self.assertNotIn('gcmstartsortkey', edge)
         self.assertNotIn('gcmendsortkey', edge)
+
+    def test_no_archive_flushes_on_pending_points(self):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+        archive = MagicMock()
+        archive.pending = []
+        # no-archive: un-upserted points are what is pending (the bug was
+        # keying off the never-filled archive list, so workers uploaded
+        # exactly once, at the very end).
+        args = SimpleNamespace(no_embed=False, no_archive=True)
+        self.assertEqual(pending_count(args, [], archive, [1] * 499), 499)
+        self.assertEqual(flush_every(args), 500)
+        # crawl-only: manifest rows, as before.
+        args = SimpleNamespace(no_embed=True, no_archive=False)
+        self.assertEqual(pending_count(args, [1, 2], archive, [1] * 999), 2)
+        self.assertEqual(flush_every(args), 500)
+        # coupled+archive: unchanged 4000 behaviour.
+        args = SimpleNamespace(no_embed=False, no_archive=False)
+        archive.pending = [1] * 3999
+        self.assertEqual(pending_count(args, [], archive, [1] * 999), 3999)
+        self.assertEqual(flush_every(args), 4000)
 
     def test_license_boundary_and_stable_id(self):
         page = {'pageid': 42, 'title': 'File:Photo.jpg', 'imageinfo': [{'width': 1000, 'height': 800,
