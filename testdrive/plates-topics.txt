@@ -1,0 +1,101 @@
+# Class F pilot. Concrete surfaces and compositing elements; no modifier cross-product.
+concrete texture
+paper texture
+wood grain
+bokeh
+smoke black
+water splash
+rust texture
+fabric texture
+marble texture
+film grain
+light leak
+fire flames
+brick texture
+plaster texture
+stone texture
+metal texture
+leather texture
+canvas texture
+linen texture
+denim texture
+burlap texture
+silk texture
+velvet texture
+knitted texture
+carpet texture
+woven texture
+cardboard texture
+parchment
+crumpled paper
+torn paper
+newspaper texture
+watercolor paper
+aged paper
+scratched metal
+brushed steel
+copper patina
+peeling paint
+cracked paint
+paint splatter
+watercolor wash
+ink splash
+ink water
+acrylic texture
+oil paint texture
+chalk texture
+charcoal texture
+grunge texture
+distressed texture
+scratches
+dust particles
+film scratches
+halftone texture
+noise texture
+gradient background
+abstract waves
+prism light
+lens flare
+light rays
+sparkles
+sparks
+embers
+fireworks
+smoke plume
+colored smoke
+mist background
+steam black
+rain glass
+water droplets
+condensation
+water ripples
+water reflection
+ocean foam
+soap bubbles
+ice texture
+frost texture
+snow texture
+sand texture
+soil texture
+gravel texture
+bark texture
+moss texture
+leaf texture
+rock texture
+slate texture
+granite texture
+terrazzo texture
+tiles texture
+asphalt texture
+wood planks
+wood rings
+rope texture
+mesh texture
+glass texture
+stained glass
+gold foil
+aluminum foil
+glitter texture
+confetti
+rainbow light
+shadow pattern

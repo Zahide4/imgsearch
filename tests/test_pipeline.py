@@ -14,6 +14,7 @@ async def _resolved(value):
     """An awaitable that is already done, for stubbing httpx's async get."""
     return value
 from cloud_corpus import clean_text, metadata, params_for, ranges, search_text
+from cloud_corpus import category_jobs, params_for_category, shard_bounds
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('search_app', ROOT / 'server/app.py')
@@ -33,6 +34,34 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         p = params_for('Ph', 'Pi', {'iicontinue': 'file|timestamp', 'continue': '||'})
         self.assertEqual((p['gaifrom'], p['gaito']), ('Ph', 'Pi'))
         self.assertEqual(p['iicontinue'], 'file|timestamp')
+
+    def test_shard_refactor_preserves_ranges(self):
+        full = shard_bounds()
+        self.assertEqual(len(full), 1 + 10 + 26 + 26 * 26)
+        self.assertEqual(ranges(0, 1), full)
+        union = [pair for w in range(4) for pair in ranges(w, 4)]
+        self.assertEqual(sorted(union), sorted(full))
+
+    def test_category_jobs_stride_across_workers(self):
+        cats = ['Category:Quality images', 'Category:Valued images']
+        all_jobs = [j for w in range(4) for j in category_jobs(cats, w, 4)]
+        self.assertEqual(len(all_jobs), 2 * len(shard_bounds()))
+        self.assertEqual(len({(j['cat'], j['start'], j['end']) for j in all_jobs}), len(all_jobs))
+        self.assertTrue(all(set(j) == {'cat', 'start', 'end', 'continue'} for j in all_jobs))
+        self.assertTrue(all(j['continue'] == {} for j in all_jobs))
+
+    def test_category_params_shape(self):
+        p = params_for_category('Category:Valued images', 'Ab', 'Ac',
+                                {'gcmcontinue': 'x', 'continue': '||'})
+        self.assertEqual(p['generator'], 'categorymembers')
+        self.assertEqual(p['gcmtitle'], 'Category:Valued images')
+        self.assertEqual(p['gcmtype'], 'file')
+        self.assertEqual((p['gcmstartsortkey'], p['gcmendsortkey']), ('Ab', 'Ac'))
+        self.assertEqual(p['gcmcontinue'], 'x')
+        self.assertEqual(p['iiurlwidth'], 384)
+        edge = params_for_category('Category:Quality images', '', None, {})
+        self.assertNotIn('gcmstartsortkey', edge)
+        self.assertNotIn('gcmendsortkey', edge)
 
     def test_license_boundary_and_stable_id(self):
         page = {'pageid': 42, 'title': 'File:Photo.jpg', 'imageinfo': [{'width': 1000, 'height': 800,
@@ -119,7 +148,7 @@ class SearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.calls[0]['prefetch'][0].using, 'image')
         self.assertEqual(self.calls[0]['prefetch'][1].using, 'bm25')
         self.assertIn('full_url',first.json()['results'][0])
-        self.assertTrue(first.json()['results'][0]['thumb'].startswith('https://wsrv.nl/'))
+        self.assertEqual(first.json()['results'][0]['thumb'], 'https://example.com/t.jpg')
 
     async def test_limits_and_errors(self):
         for limit in [0,-1,101]:
@@ -129,6 +158,70 @@ class SearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r.status_code,400)
         r=await self.client.get('/api/search',params={'q':'!!!'})
         self.assertEqual(r.json()['results'],[])
+
+class RefusalTests(unittest.IsolatedAsyncioTestCase):
+    """Adult queries get a hard refusal, never a result set. The embed tower
+    is absent here (S['sess'] is None), which also proves the fail-open and
+    core-term paths need no model."""
+    async def asyncSetUp(self):
+        self.calls=[]
+        async def query_points(*args,**kw):
+            self.calls.append(kw)
+            return SimpleNamespace(points=[SimpleNamespace(score=.12,payload={'image_id':'commons:1','title':'test',
+                    'thumb_origin':'https://example.com/t.jpg','full_url':'https://example.com/original.jpg'})])
+        api.S.update(qc=SimpleNamespace(query_points=query_points),lock=asyncio.Lock())
+        api.S['results'].clear()
+        self.client=httpx.AsyncClient(transport=httpx.ASGITransport(app=api.app),base_url='http://test')
+        self.patch=patch.object(api,'embed',return_value=[1.0]+[0.0]*767)
+        self.patch.start()
+        self.old_adult=api._ADULT
+        api._ADULT=None
+
+    async def asyncTearDown(self):
+        api._ADULT=self.old_adult
+        self.patch.stop()
+        await self.client.aclose()
+
+    async def test_core_term_refused(self):
+        r=await self.client.get('/api/search',params={'q':'porn'})
+        self.assertEqual(r.status_code,200)
+        self.assertEqual(r.json()['results'],[])
+        self.assertEqual(r.json()['refusal'],api.REFUSAL_MESSAGE)
+        self.assertEqual(self.calls,[])
+
+    async def test_whole_word_only(self):
+        r=await self.client.get('/api/search',params={'q':'titmouse'})
+        self.assertNotIn('refusal',r.json())
+        self.assertEqual(len(r.json()['results']),1)
+        r=await self.client.get('/api/search',params={'q':'PENIS!'})
+        self.assertEqual(r.json()['refusal'],api.REFUSAL_MESSAGE)
+
+    async def test_expanded_core_terms(self):
+        for q in ['ejaculation','sperm','cum shot','pajeet','nigger','gook',
+                  'lolicon','upskirt','shemale','faggot','redskin','muzzie']:
+            r=await self.client.get('/api/search',params={'q':q})
+            self.assertEqual(r.json().get('refusal'),api.REFUSAL_MESSAGE,msg=q)
+
+    async def test_legit_phrases_and_nonmatches_pass(self):
+        for q in ['sperm whale','spic and span cleaning','niger river',
+                  'fire retardant drop','ritz cracker','titmouse',
+                  'classical nude sculpture','anatomy diagram']:
+            r=await self.client.get('/api/search',params={'q':q})
+            self.assertNotIn('refusal',r.json(),msg=q)
+
+    async def test_cosine_backstop(self):
+        import numpy as np
+        api._ADULT=np.array([[1.0]+[0.0]*767])
+        r=await self.client.get('/api/search',params={'q':'forest'})
+        self.assertEqual(r.json()['refusal'],api.REFUSAL_MESSAGE)
+
+    async def test_fail_open_without_tower(self):
+        r=await self.client.get('/api/search',params={'q':'forest'})
+        self.assertNotIn('refusal',r.json())
+
+    async def test_refusal_ignores_include_sensitive(self):
+        r=await self.client.get('/api/search',params={'q':'porn','include_sensitive':'true'})
+        self.assertEqual(r.json()['refusal'],api.REFUSAL_MESSAGE)
 
 class ManifestHandoff(unittest.TestCase):
     """The crawl writes a manifest; the GPU pass reads it. That file is the

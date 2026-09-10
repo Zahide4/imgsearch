@@ -12,8 +12,9 @@ worker-data/
 # The scripts and the measured results are kept; the images are not.
 testdrive/thumbs/
 testdrive/origins.txt
+testdrive/plates-pilot/
+testdrive/plates-smoke/
 
 # Credentials. Never committed.
 .env
 .env.cloud-backup
-

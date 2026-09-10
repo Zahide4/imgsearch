@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ImgSearch · Plates pilot review</title>
+<style>
+:root{color-scheme:dark;font:15px/1.5 system-ui;background:#141619;color:#e8e9eb}body{margin:0;padding:32px;max-width:1600px;margin:auto}h1{font-size:30px;margin:0}p{max-width:90ch;color:#adb5c1}header{border-bottom:1px solid #3c424b;padding-bottom:20px}button,select{font:inherit;color:inherit;background:#252b34;border:1px solid #505b6d;padding:8px 12px;border-radius:6px;cursor:pointer}button:disabled{opacity:.4;cursor:default}button:focus-visible,select:focus-visible,a:focus-visible{outline:3px solid #9bc0ff}nav{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:20px 0}#grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:18px}article{background:#20242a;border:1px solid #3b414c;border-radius:8px;overflow:hidden}article[data-label=usable]{border-color:#78caa1}article[data-label=unusable],article[data-label=broken]{border-color:#eaa18e}.preview{display:block;background:repeating-conic-gradient(#30343a 0% 25%,#272b31 0% 50%) 50%/20px 20px;height:200px}img{width:100%;height:100%;object-fit:contain}.body{padding:12px}.title{font-weight:650;min-height:44px;overflow-wrap:anywhere}.meta{color:#a8b2c1;font-size:12px;margin:6px 0}.actions{display:flex;gap:5px;flex-wrap:wrap}.actions button{font-size:12px;padding:6px 8px}button[aria-pressed=true]{background:#44617d;border-color:#b1d4ff}a{color:#a7c9ff}#stats{padding:16px;background:#232c38;border-radius:8px;white-space:pre-line}#notice{color:#ffd39c}details{margin:12px 0}input[type=file]{max-width:260px}footer{margin:24px 0;color:#adb5c1}
+</style>
+<header><h1>Plates, by eye</h1><p>Would you use this image as a surface, background or compositing element? Judge visual usefulness, visible watermarks, distracting subjects and near-duplicates. Open the source to verify resolution before marking usable. “Broken” means the preview failed; check the source before deciding it is unavailable.</p>
+<p>This is a metadata pilot. Provider links may be resized images. Previews load directly from Flickr and Rawpixel; no image corpus is stored here.</p>
+<div id="stats"></div><p id="notice" role="status"></p>
+<details><summary>Review and decision rules</summary><p>Review all 10,000 candidates before applying the 50% rule. The lower bound counts usable labels only; the upper bound assumes every remaining candidate is usable. Unknown labels never count as rejected. Source totals expose supply differences; this first sample does not prove a 500k yield. Labels are saved in this browser when storage is available. Export a backup after each session and import it to resume in another browser.</p></details>
+</header>
+<nav aria-label="Review controls"><label>Source <select id="source"><option value="">All</option><option>flickr</option><option>rawpixel</option></select></label>
+<label>Topic <select id="topic"><option value="">All</option></select></label>
+<label>Review <select id="filter"><option value="">All</option><option value="unreviewed">Unreviewed</option><option value="usable">Usable</option><option value="unusable">Unusable</option><option value="broken">Broken</option></select></label>
+<button id="export">Export labels</button><label>Import labels <input id="import" type="file" accept="application/json"></label></nav>
+<nav aria-label="Pages"><button id="prev">Previous</button><span id="page" aria-live="polite"></span><button id="next">Next</button></nav>
+<main id="grid"></main><footer id="foot"></footer>
+<script>
+const DATA=/*PILOT_DATA*/null;
+if(!DATA){document.getElementById('notice').textContent='Template only. Generate a report with plates_pilot.py.';}else{
+const $=id=>document.getElementById(id), rows=DATA.rows, allowed=new Set(['usable','unusable','broken']), ids=new Set(rows.map(x=>x.id));
+const key='imgsearch-plates-'+DATA.summary.pilot_id;let labels={},page=0,storage=true;
+try{const saved=JSON.parse(localStorage.getItem(key)||'{}');for(const [id,label] of Object.entries(saved))if(ids.has(id)&&allowed.has(label))labels[id]=label;}catch(e){storage=false;}
+const element=(tag,text,cls)=>{const el=document.createElement(tag);if(text!==undefined)el.textContent=text;if(cls)el.className=cls;return el;};
+for(const t of [...new Set(rows.map(x=>x.topic))].sort()){$('topic').append(element('option',t));}
+function save(){try{localStorage.setItem(key,JSON.stringify(labels));}catch(e){storage=false;}$('notice').textContent=storage?'':'Browser storage unavailable. Export labels before closing this report.';}
+function stats(){
+ const counts={usable:0,unusable:0,broken:0};for(const label of Object.values(labels))counts[label]++;
+ const reviewed=Object.keys(labels).length, pending=rows.length-reviewed, n=rows.length;
+ const low=n?100*counts.usable/n:0, high=n?100*(counts.usable+pending+counts.broken)/n:0;
+ let decision='Pending: complete the 10k harvest and review; resolve any broken previews.';
+ if(n>=DATA.summary.required_review_count&&pending===0&&counts.broken===0&&n>0)decision=low<50?'Under 50% usable: proposed Class F budget 200k; consider background removal.':'At least 50% usable: source pilot passes; bulk reach still needs measurement.';
+ $('stats').textContent=`${n.toLocaleString()} / ${DATA.summary.target.toLocaleString()} candidates · ${reviewed.toLocaleString()} reviewed\n${counts.usable} usable · ${counts.unusable} unusable · ${counts.broken} broken · ${pending} unreviewed\nUsable fraction bounds: ${low.toFixed(1)}–${high.toFixed(1)}% · ${decision}`;
+ $('foot').textContent=Object.entries(DATA.summary.sources).map(([s,v])=>{const sr=rows.filter(r=>r.source===s),kept=sr.filter(r=>labels[r.id]==='usable').length,done=sr.filter(r=>labels[r.id]).length;return `${s}: ${v.raw} returned → ${v.candidates} candidates; ${v.duplicates} exact duplicates; ${done} reviewed, ${kept} usable`;}).join(' | ')+' · Run status: '+DATA.summary.status;
+}
+function render(){
+ const filtered=rows.filter(r=>(!$('source').value||r.source===$('source').value)&&(!$('topic').value||r.topic===$('topic').value)&&(!$('filter').value||($('filter').value==='unreviewed'?!labels[r.id]:labels[r.id]===$('filter').value)));
+ const pages=Math.max(1,Math.ceil(filtered.length/24));page=Math.min(page,pages-1);$('page').textContent=`Page ${page+1} of ${pages} · ${filtered.length} images`;$('prev').disabled=page===0;$('next').disabled=page>=pages-1;$('grid').replaceChildren();
+ for(const r of filtered.slice(page*24,page*24+24)){
+  const card=element('article');card.dataset.label=labels[r.id]||'';
+  const link=element('a',undefined,'preview');link.href=r.source_url;link.target='_blank';link.rel='noopener noreferrer';
+  const img=element('img');img.loading='lazy';img.referrerPolicy='no-referrer';img.alt=r.title||r.topic;img.src=r.thumb_origin;
+  const failure=element('div','', 'meta');img.onerror=()=>{failure.textContent='Preview failed — inspect source; no automatic rejection.';};link.append(img);card.append(link);
+  const body=element('div',undefined,'body');body.append(element('div',r.title||'Untitled','title'),element('div',`${r.source} · ${r.topic} · rank ${r.rank+1} · ${r.width}×${r.height}`,'meta'),element('div',`${r.creator} · ${r.license.toUpperCase()} ${r.license_version||''}`,'meta'),failure);
+  const source=element('a','Inspect source');source.href=r.source_url;source.target='_blank';source.rel='noopener noreferrer';body.append(source);
+  const attribution=element('details');attribution.append(element('summary','Attribution'),element('p',r.attribution));body.append(attribution);
+  const actions=element('div',undefined,'actions');for(const value of ['usable','unusable','broken','clear']){const b=element('button',value[0].toUpperCase()+value.slice(1));b.setAttribute('aria-pressed',String(labels[r.id]===value));b.onclick=()=>{if(value==='clear')delete labels[r.id];else labels[r.id]=value;save();render();};actions.append(b);}body.append(actions);card.append(body);$('grid').append(card);
+ }
+ if(!filtered.length)$('grid').append(element('p','No images in this view.'));stats();
+}
+for(const id of ['source','topic','filter'])$(id).onchange=()=>{page=0;render();};
+$('prev').onclick=()=>{page--;render();window.scrollTo(0,0);};$('next').onclick=()=>{page++;render();window.scrollTo(0,0);};
+$('export').onclick=()=>{const blob=new Blob([JSON.stringify({pilot_id:DATA.summary.pilot_id,exported_at:new Date().toISOString(),labels},null,2)],{type:'application/json'});const url=URL.createObjectURL(blob),a=element('a');a.href=url;a.download='plates-labels-'+new Date().toISOString().replaceAll(':','-')+'.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
+$('import').onchange=async event=>{try{const file=event.target.files[0];if(!file)return;const data=JSON.parse(await file.text());if(data.pilot_id!==DATA.summary.pilot_id)throw Error('This label file belongs to a different pilot.');if(!data.labels||Array.isArray(data.labels)||typeof data.labels!=='object')throw Error('Invalid label file.');const incoming=Object.entries(data.labels);if(incoming.some(([id,value])=>!ids.has(id)||!allowed.has(value)))throw Error('Unknown image ID or label; nothing imported.');Object.assign(labels,data.labels);save();render();}catch(e){$('notice').textContent=e.message;}event.target.value='';};
+save();render();
+}
+</script></html>

@@ -30,6 +30,78 @@ S = {'sess': None, 'tok': None, 'qc': None, 'cache': OrderedDict(),
 _PUNCT = str.maketrans('', '', string.punctuation)
 ALLOWED_LICENSES = {'public_domain', 'attribution', 'share_alike'}
 
+# Adult-query refusal. The image safety filter is query-blind: it trims
+# globally-high-scoring images, so a hostile query retrieves the most similar
+# of whatever passed (measured: "porn" top-48 median safety 0.0001 against a
+# 0.005 cutoff). The fix asks the other question -- "is this QUERY adult?" --
+# after embedding (the vector already exists) and before Qdrant.
+#
+# Two layers, because neither works alone (testdrive/calibrate_query_gate.py):
+# max-cosine to adult prompts cannot separate ("penis" 0.8253 scores below
+# "classical nude sculpture" 0.8303), so an embedding-only gate either misses
+# the exact complaint terms or eats legitimate art. Hence:
+#   1. CORE_TERMS: whole-word match on unambiguous terms. Deliberately NOT
+#      included: nude/naked (classical sculpture, mole rats), cock/ass/tit
+#      (rooster, donkey, bird), breast (food, anatomy), nipple (grease
+#      nipple), cracker (food), foursome (golf), tranny (transmission),
+#      fag (cigarette), colored (civil-rights history), vibrator
+#      (construction equipment), stripper (paint stripper), niger (the
+#      country -- a deliberate non-match), abo (blood group), labia
+#      (possible taxonomy collision). Deliberately included despite edge
+#      uses: tits (birders write "great tits"), dick/pussy (names, cats),
+#      cum ("cum laude"), retard (the verb), chink (the idiom), dyke
+#      (vs dike), snuff (tobacco tins) -- image-search intent is
+#      overwhelmingly the slur/slang, and the refusal message offers
+#      recourse. Two legit phrases are carved out in REFUSAL_EXCEPTIONS
+#      instead of dropping their terms. Tune from the refusal log, not taste.
+#   2. Cosine backstop at 0.85: catches paraphrases ("naked girl" 0.8699,
+#      "explicit sex" 0.9332) with zero legitimate refusals on the 27-query
+#      battery (legit max 0.8303). Re-run the calibrator at any model swap.
+REFUSAL_MESSAGE = ("We don't have that as it's NSFW. "
+                   "If your query is falsely flagged, let us know.")
+REFUSAL_COSINE = 0.85
+REFUSAL_CORE = frozenset({
+    # Explicit sexual content: industry, anatomy, acts, paraphilias, sites.
+    'porn', 'porno', 'pornography', 'pornographic', 'pornhub', 'xvideos',
+    'xhamster', 'redtube', 'youporn', 'brazzers', 'onlyfans', 'rule34',
+    'xxx', 'hentai', 'erotic', 'erotica', 'nsfw', 'nsfl',
+    'penis', 'penile', 'vagina', 'vaginal', 'vulva', 'clitoris', 'clit',
+    'testicle', 'testicles', 'scrotum', 'semen', 'sperm', 'ejaculation',
+    'ejaculate', 'ejaculating', 'orgasm', 'orgasmic', 'masturbation',
+    'masturbate', 'masturbating', 'cum', 'cumming', 'cumshot', 'jizz',
+    'blowjob', 'handjob', 'boob', 'boobs', 'tits', 'titties', 'pussy',
+    'dick', 'dicks', 'cunt', 'orgy', 'gangbang', 'threesome', 'bukkake',
+    'anal', 'dildo', 'fleshlight', 'upskirt', 'downblouse', 'creepshot',
+    'lolicon', 'shotacon', 'snuff', 'incest', 'bestiality', 'rape',
+    'bdsm', 'fetish', 'slut', 'whore', 'milf', 'dilf',
+    'shemale', 'shemales', 'ladyboy', 'ladyboys',
+    # Racial, ethnic, religious and anti-LGBT slurs.
+    'nigger', 'niggers', 'nigga', 'niggas', 'niggah',
+    'pajeet', 'paki', 'chink', 'chinks', 'chinky', 'gook', 'gooks',
+    'spic', 'spics', 'spick', 'kike', 'kikes', 'yid',
+    'coon', 'coons', 'wog', 'wogs', 'darkie', 'darkies', 'redskin',
+    'squaw', 'injun', 'towelhead', 'towelheads', 'raghead', 'ragheads',
+    'beaner', 'beaners', 'wetback', 'wetbacks', 'camel jockey', 'muzzie',
+    'honky', 'honkies',
+    'faggot', 'faggots', 'dyke', 'dykes',
+    'retard', 'retarded',
+})
+# Whole-word terms with one legitimate phrase each. The term still fires
+# everywhere else; the phrase passes. ("sperm whale" is Class B fauna;
+# "spic and span" is cleaning products.)
+REFUSAL_EXCEPTIONS = {
+    'sperm': ('sperm whale',),
+    'spic': ('spic and span',),
+}
+ADULT_PROMPTS = [
+    'pornography',
+    'explicit sexual activity',
+    'a naked person in a sexual pose',
+    'a photograph of exposed genitalia',
+    'erotic imagery',
+]
+_ADULT = None  # frozen adult-concept vectors, loaded with the text tower
+
 # Commons is an educational repository with no content policy of the kind a
 # creative tool needs, and enumeration makes the proportion worse: the curated
 # prototype came from 481 topics, while the 10M build walks the whole
@@ -107,6 +179,50 @@ def embed(text):
     vec = (vec / norm).astype(np.float32).tolist()
     remember(S['cache'], text, vec, 512)
     return vec
+
+
+def ensure_adult_vectors():
+    """Freeze adult-concept vectors with the production text tower.
+
+    Idempotent; runs inside the embed lock's thread. A missing tower means
+    fail-open (returns False): search must never break because refusal
+    infrastructure is not loaded -- same philosophy as unscored rows passing
+    the image filter.
+    """
+    global _ADULT
+    if _ADULT is not None or S['sess'] is None or S['tok'] is None:
+        return _ADULT is not None
+    vecs = []
+    for prompt in ADULT_PROMPTS:
+        ids = np.array([S['tok'].encode(prompt).ids], dtype=np.int64)
+        v = S['sess'].run(['pooler_output'], {'input_ids': ids})[0][0].astype(np.float64)
+        nrm = float(np.linalg.norm(v))
+        if not np.isfinite(v).all() or not np.isfinite(nrm) or nrm <= 0:
+            return False
+        vecs.append(v / nrm)
+    _ADULT = np.array(vecs)
+    return True
+
+
+def refusal_reason(text, vector):
+    """Why this query is refused, or '' to let it through.
+
+    `text` is already canon()icalised: lowercase, no punctuation. Core terms
+    match on whole words only, so "titmouse" never trips on "tit".
+    """
+    padded = ' ' + text + ' '
+    for term in REFUSAL_CORE:
+        if ' ' + term + ' ' not in padded:
+            continue
+        exc = REFUSAL_EXCEPTIONS.get(term)
+        if exc and any(' ' + phrase + ' ' in padded for phrase in exc):
+            continue
+        return 'core:' + term
+    if _ADULT is not None:
+        sims = np.asarray(vector, dtype=np.float64) @ _ADULT.T
+        if bool(np.isfinite(sims).all()) and float(sims.max()) >= REFUSAL_COSINE:
+            return 'cosine:%.4f' % float(sims.max())
+    return ''
 
 
 def sign(key):
@@ -208,7 +324,22 @@ async def search(request: Request, q: str = Query(..., max_length=300),
         if await request.is_disconnected():
             raise HTTPException(499, 'Search cancelled')
         vector = await asyncio.to_thread(embed, text)
+        await asyncio.to_thread(ensure_adult_vectors)
     embedded = time.perf_counter()
+    reason = refusal_reason(text, vector)
+    if reason:
+        # Hard refusal, not an empty result: the app shows REFUSAL_MESSAGE
+        # instead of searching. Logged (refused queries only, for tuning --
+        # this is the interim false-flag channel until a report endpoint
+        # exists) and cached like any other answer. Applies even with
+        # include_sensitive=true: that flag is for legitimate edge searches,
+        # not adult intent.
+        print('refused q=%r reason=%s' % (text, reason), flush=True)
+        data = {'results': [], 'ms': round((embedded - start) * 1000, 1),
+                'timing': {'embed_ms': round((embedded - start) * 1000, 1), 'ann_ms': 0},
+                'refusal': REFUSAL_MESSAGE}
+        remember(S['results'], key, (time.monotonic(), data), 128)
+        return data
     flt = search_filter(licenses, include_sensitive)
     candidates = max(100, limit * 2)
     dense_prefetch = models.Prefetch(

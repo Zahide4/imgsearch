@@ -73,14 +73,36 @@ def search_text(row):
     )))[:1400]
 
 
-def ranges(worker, workers):
-    # Hundreds of independent ranges distribute discovery across subjects,
-    # rather than taking 125k nearly identical names from one letter.
+def shard_bounds():
+    # Filename/sortkey prefix shards shared by the allimages walker and the
+    # category walker: disjoint, shuffled once with a fixed seed so every
+    # worker derives the same assignment without coordination.
     starts = sorted(set([''] + list(string.digits + string.ascii_uppercase) +
                         [a + b for a in string.ascii_uppercase for b in string.ascii_lowercase]))
     all_ranges = list(zip(starts, starts[1:] + [None]))
     random.Random(20260908).shuffle(all_ranges)
-    return all_ranges[worker::workers]
+    return all_ranges
+
+
+def ranges(worker, workers):
+    # Hundreds of independent ranges distribute discovery across subjects,
+    # rather than taking 125k nearly identical names from one letter.
+    return shard_bounds()[worker::workers]
+
+
+def category_jobs(categories, worker, workers):
+    # One job per (category, sortkey-prefix shard) for a flat
+    # generator=categorymembers crawl (the Quality/Featured/Valued layer).
+    # Sortkeys default to file titles, so these shards partition category
+    # members the way ranges() partitions allimages -- with the same seam
+    # tolerance: dedupe by image_id absorbs overlaps, and the server-side
+    # gcmendsortkey bounds each shard (metadata() gets end=None because the
+    # bound is a sortkey, not a title). Strided assignment keeps every worker
+    # on every category, so a small category finishes across all workers
+    # instead of stalling on one.
+    all_jobs = [{'cat': cat, 'start': lo, 'end': hi, 'continue': {}}
+                for cat in categories for lo, hi in shard_bounds()]
+    return all_jobs[worker::workers]
 
 
 def params_for(start, end, continuation):
@@ -104,6 +126,27 @@ def params_for(start, end, continuation):
     # by the API, and Commons contains names in decomposed form, so echoing
     # one back verbatim eventually kills the worker. Two workers died this
     # way ~23 pages in.
+    return {k: unicodedata.normalize('NFC', v) if isinstance(v, str) else v
+            for k, v in params.items()}
+
+
+def params_for_category(cat, start, end, continuation):
+    # Flat category enumeration for the Quality/Featured/Valued layer.
+    # gcmtype=file keeps it to files (no subcategories, no recursion);
+    # sortkey order plus prefix bounds shard the category the way gaifrom/
+    # gaito shard allimages. Same imageinfo shape downstream, so metadata(),
+    # fetch, embed, safety and upsert are untouched. Empty start means from
+    # the very beginning; end None means to the very end.
+    params = dict(action='query', format='json', formatversion=2,
+                  generator='categorymembers', gcmtitle=cat, gcmtype='file',
+                  gcmlimit=50, gcmsort='sortkey',
+                  prop='imageinfo', iiprop='url|size|extmetadata|mime|sha1',
+                  iiurlwidth=384, maxlag=5)
+    if start:
+        params['gcmstartsortkey'] = start
+    if end is not None:
+        params['gcmendsortkey'] = end
+    params.update(continuation)  # retain sortkey position during imageinfo continuation
     return {k: unicodedata.normalize('NFC', v) if isinstance(v, str) else v
             for k, v in params.items()}
 
@@ -399,6 +442,7 @@ async def run(args):
                              ('safety', models.PayloadSchemaType.FLOAT)]:
             qc.create_payload_index(COLLECTION, field, field_schema=schema, wait=True)
     checkpoint_key = f'checkpoints/{args.build}-{args.workers}-{args.worker}.json'
+    categories = [c.strip() for c in (args.categories or '').split(',') if c.strip()]
 
     def read_checkpoint():
         if args.no_archive:
@@ -441,7 +485,8 @@ async def run(args):
                 token=os.environ['HF_TOKEN'])).read_text())
         except EntryNotFoundError:
             return None
-    queue = deque({'start': lo, 'end': hi, 'continue': {}} for lo, hi in ranges(args.worker, args.workers))
+    queue = deque(category_jobs(categories, args.worker, args.workers) if categories
+                  else ({'start': lo, 'end': hi, 'continue': {}} for lo, hi in ranges(args.worker, args.workers)))
     done = 0
     resume_seq = 0
     state = read_checkpoint()
@@ -560,7 +605,13 @@ async def run(args):
     async with httpx.AsyncClient(headers={'User-Agent': UA}, follow_redirects=True) as client:
         while queue and done < args.target and time.monotonic() - start_time < args.max_seconds:
             job = queue[0]
-            r = await request(client, COMMONS, params=params_for(job['start'], job['end'], job['continue']))
+            if 'cat' in job:
+                params = params_for_category(job['cat'], job['start'], job['end'], job['continue'])
+                end = None  # the shard bound is a sortkey, enforced server-side
+            else:
+                params = params_for(job['start'], job['end'], job['continue'])
+                end = job['end']
+            r = await request(client, COMMONS, params=params)
             data = r.json()
             if data.get('error'):
                 code = data['error'].get('code')
@@ -577,7 +628,7 @@ async def run(args):
                     save()
                     continue
                 raise RuntimeError(f"Commons API error: {code}")
-            rows = [row for p in data.get('query', {}).get('pages', []) if (row := metadata(p, job['end']))]
+            rows = [row for p in data.get('query', {}).get('pages', []) if (row := metadata(p, end))]
             rows = list({row['image_id']: row for row in rows}.values())
             if rows:
                 # Crawl-only has nothing to ask: the embed pass skips rows
@@ -715,6 +766,11 @@ if __name__ == '__main__':
     p.add_argument('--workers', type=int, default=4)
     p.add_argument('--target', type=int, required=True)
     p.add_argument('--build', default='commons-v1')
+    p.add_argument('--categories', default='',
+                   help='comma-separated Commons categories for a flat '
+                        'generator=categorymembers crawl (the Quality/Featured/'
+                        'Valued layer). Empty means the default filename-range '
+                        'allimages walk. Sharded by sortkey prefix across workers.')
     p.add_argument('--batch', type=int, default=16)
     # Measured on a GitHub runner (4 vCPU, AMD EPYC 7763): 2 threads
     # gave 4.8 img/s through SigLIP and 4 gave 4.2. More threads than
