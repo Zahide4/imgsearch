@@ -865,11 +865,13 @@ async def run(args):
                     save()
                     continue
                 if code == 'urlparamnormal':
-                    # One unrepresentable cursor should cost a range, not a
+                    # One unrepresentable cursor should cost a job, not a
                     # worker. Drop this job, keep whatever it already indexed,
-                    # and move to the next range.
-                    print(f'worker {args.worker}: dropping range '
-                          f'{job["start"]!r} after {code}', flush=True)
+                    # and move to the next one. Job shape differs by mode
+                    # (ranges have start/end, topic shards have topic/licence).
+                    label = job.get('start', {k: job.get(k) for k in ('topic', 'licence', 'band')})
+                    print(f'worker {args.worker}: dropping job '
+                          f'{label!r} after {code}', flush=True)
                     queue.popleft()
                     save()
                     continue
