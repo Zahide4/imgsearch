@@ -38,6 +38,15 @@ on:
         description: Wall clock per job, under the 6 h runner ceiling
         default: '16200'
         required: true
+      workers:
+        description: >-
+          How many parallel crawlers. Must match the account's Actions
+          concurrency: 20 on Free, 40 on Pro, 60 on Team. Changing it
+          reshuffles range assignment AND invalidates every saved cursor,
+          because the checkpoint key contains the worker count -- so pick a
+          number and keep it for the whole build.
+        default: '20'
+        required: true
 
 permissions:
   contents: read
@@ -47,18 +56,29 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # A matrix cannot be written directly from an input, so build it here.
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+    steps:
+      - id: gen
+        run: |
+          python3 -c "import json;print('matrix='+json.dumps(list(range(${{ inputs.workers }}))))" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: plan
     runs-on: ubuntu-latest
     timeout-minutes: 330
     strategy:
       fail-fast: false
-      # 20 concurrent jobs is the GitHub Free ceiling, and each runner has its
-      # own IP -- which is the point. The per-host rate limit that throttles
-      # one machine applies per address, so this is 20 polite crawlers rather
-      # than one impolite one.
-      max-parallel: 20
+      # No max-parallel: GitHub already caps this at the account's concurrency
+      # limit, so the workflow naturally uses whatever the plan allows -- 20 on
+      # Free, 40 on Pro. Each runner has its own IP, which is the point: the
+      # per-host rate limit applies per address, so this is N polite crawlers
+      # rather than one impolite one.
       matrix:
-        worker: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19]
+        worker: ${{ fromJson(needs.plan.outputs.matrix) }}
     env:
       # Only to authenticate the SigLIP weight download. Twenty runners
       # pulling 600 MB from the Hub at once unauthenticated is exactly the
@@ -97,10 +117,11 @@ jobs:
           BUILD: ${{ inputs.build }}
           MAX_SECONDS: ${{ inputs.max_seconds }}
           WORKER: ${{ matrix.worker }}
+          WORKERS: ${{ inputs.workers }}
         run: |
           set +e
           python cloud_corpus.py --no-archive \
-            --worker "$WORKER" --workers 20 \
+            --worker "$WORKER" --workers "$WORKERS" \
             --target "$TARGET" --build "$BUILD" \
             --threads 2 --max-seconds "$MAX_SECONDS"
           code=$?
