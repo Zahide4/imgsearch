@@ -1,0 +1,37 @@
+{
+  "target": 10000000,
+  "note": "Allocation is demand x supply. Demand from Pexels/Pixabay/Unsplash published popular-search lists (2026). Supply from Commons categoryinfo + a depth probe: recursion to depth 3 turned Category:Birds from 2 files into 158,325, so every root below is walked recursively, not read flat.",
+  "quality_gate": {
+    "method": "SigLIP prompt scoring at crawl time, same matmul as the safety score",
+    "keep": ["a photograph", "a professional photograph", "a landscape photograph", "a photograph of an animal", "a photograph of a building", "a still life photograph", "a painting or illustration"],
+    "drop": ["a scanned page of a book", "a page of printed text", "a technical diagram or schematic", "a map or floor plan", "a coat of arms or heraldic shield", "a herbarium specimen sheet", "a museum catalogue record card", "a logo or icon", "a screenshot of software", "a chart or graph", "a signature or handwriting sample", "a blurry or damaged photograph"]
+  },
+  "buckets": [
+    {"name": "Nature and landscape", "allocation": 2400000, "demand": "#1 on every published list: nature, landscape, forest, sunset, mountains, beach, sky, ocean, scenery, water",
+     "supply": "deep and excellent", "roots": ["Landscapes", "Forests", "Mountains", "Beaches", "Deserts", "Skies", "Clouds", "Sunsets", "Bodies of water", "Waterfalls", "Rivers", "Lakes", "Islands", "Caves", "Glaciers", "Volcanoes", "Seasons", "Weather", "Natural phenomena"]},
+    {"name": "Animals and wildlife", "allocation": 1600000, "demand": "cat, dog, bird, butterfly, horse, elephant, lion, fish, wolf, cow, baby animal",
+     "supply": "the deepest tree on Commons", "roots": ["Birds", "Mammals", "Insects", "Fish", "Reptiles", "Amphibians", "Domestic animals", "Cats", "Dogs", "Horses", "Marine animals", "Butterflies"]},
+    {"name": "Architecture and places", "allocation": 1600000, "demand": "cities, streets, buildings, bridges, interiors, plus heavy city-name searching (paris, new york, hamburg, glasgow, varanasi)",
+     "supply": "Commons is overwhelmingly geographic; excellent", "roots": ["Architecture", "Buildings", "Cities", "Streets", "Bridges", "Interiors", "Towers", "Castles", "Ruins", "Skylines", "Urban landscapes", "Doors", "Windows", "Staircases", "Roofs"]},
+    {"name": "Plants and flowers", "allocation": 800000, "demand": "flowers, rose, trees, garden",
+     "supply": "very deep", "roots": ["Flowers", "Trees", "Plants by common name", "Gardens", "Leaves", "Fruits", "Vegetables", "Fungi"]},
+    {"name": "Art and illustration", "allocation": 700000, "demand": "art, paintings, drawings, vintage, clipart, aesthetic",
+     "supply": "Commons is a museum archive; outstanding here", "roots": ["Paintings", "Drawings", "Prints", "Sculptures", "Illustrations", "Posters", "Vintage advertisements", "Botanical illustrations", "Book illustrations", "Street art"]},
+    {"name": "Transport and vehicles", "allocation": 600000, "demand": "car, airplane, train, ship, super car, bmw",
+     "supply": "very strong", "roots": ["Vehicles", "Automobiles", "Aircraft", "Ships", "Trains", "Bicycles", "Motorcycles", "Boats", "Buses"]},
+    {"name": "Food and drink", "allocation": 600000, "demand": "food, coffee, bakery, biryani, cooking",
+     "supply": "moderate, grows fast with depth", "roots": ["Food", "Drinks", "Cuisine by country", "Bread", "Fruit", "Desserts", "Coffee", "Markets"]},
+    {"name": "Culture, religion and festivals", "allocation": 550000, "demand": "very high and under-served elsewhere: krishna, shiva, ganesh, diwali, durga, islamic, mosque, kaaba, madina, christmas, jesus",
+     "supply": "strong: temples, mosques, festivals, religious art", "roots": ["Hinduism", "Islam", "Christianity", "Buddhism", "Religious buildings", "Temples", "Mosques", "Churches", "Festivals", "Traditional clothing", "Folk art", "Ceremonies"]},
+    {"name": "People and daily life", "allocation": 500000, "demand": "people, couple, family, baby, portraits, office, doctor, gym",
+     "supply": "WEAK. This is stock photography's home turf and Commons' blind spot. Allocation is deliberately below demand because the images are not there to take.", "roots": ["Portrait photographs", "People by activity", "Occupations", "Children", "Families", "Sports", "Dance", "Music performances", "Crowds"]},
+    {"name": "Science, space and technology", "allocation": 400000, "demand": "space, universe, earth, brain, computer, ai",
+     "supply": "strong; Commons carries NASA and ESA public-domain imagery", "roots": ["Astronomy", "Space", "Earth from space", "Microscopy", "Anatomy", "Technology", "Machines", "Tools", "Laboratories"]},
+    {"name": "Textures, patterns and backgrounds", "allocation": 350000, "demand": "ENORMOUS. Pixabay's list is dominated by wallpaper/background variants: 4k wallpaper, phone wallpaper, zoom background, marble background, wood texture",
+     "supply": "WEAK on Commons, which does not shoot for this use. Under-allocated for the same reason as People.", "roots": ["Textures", "Patterns", "Surfaces", "Stone textures", "Wood", "Fabrics", "Rust", "Abstract art", "Macro photographs"]},
+    {"name": "Historical and archival", "allocation": 400000, "demand": "vintage, black and white, retro, historical, old",
+     "supply": "excellent and genuinely differentiating; nobody else has this", "roots": ["Black and white photographs", "Historical images by year", "Archival photographs", "Vintage photographs", "War photographs", "Historical maps of cities"]},
+    {"name": "Quality images (flat, vetted)", "allocation": 462000, "demand": "not a topic; a quality floor",
+     "supply": "462,631 files in ONE flat category, reviewed by Commons contributors for photographic quality. Highest signal-per-crawl available.", "roots": ["Quality images", "Featured pictures", "Valued images"]}
+  ]
+}
