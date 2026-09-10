@@ -526,6 +526,11 @@ async def run(args):
     if done >= args.target:
         print(f'already complete: {done}/{args.target}', flush=True)
         return
+    # Jobs queued is the worker's whole future: 0 here means it will skip
+    # everything and exit green within minutes (inherited an exhausted
+    # checkpoint, or a category with nothing in its shards). Loud now so a
+    # silent skip never again looks like a stall.
+    print(f'worker {args.worker}: {len(queue)} jobs queued, {done}/{args.target} indexed', flush=True)
     if args.no_embed:
         if not storage.enabled():
             raise SystemExit('--no-embed needs a bucket: set STORAGE_BACKEND=s3 and the S3_* vars')
