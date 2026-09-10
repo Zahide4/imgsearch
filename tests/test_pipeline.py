@@ -239,6 +239,15 @@ class RefusalTests(unittest.IsolatedAsyncioTestCase):
             r=await self.client.get('/api/search',params={'q':q})
             self.assertNotIn('refusal',r.json(),msg=q)
 
+    async def test_slur_exceptions_pass_while_bare_terms_refuse(self):
+        for q in ['chink of light','chink in the armour','chink in the armor',
+                  'dyke landscape','sea dyke','dutch dyke']:
+            r=await self.client.get('/api/search',params={'q':q})
+            self.assertNotIn('refusal',r.json(),msg=q)
+        for q in ['chink','dyke']:
+            r=await self.client.get('/api/search',params={'q':q})
+            self.assertEqual(r.json().get('refusal'),api.REFUSAL_MESSAGE,msg=q)
+
     async def test_cosine_backstop(self):
         import numpy as np
         api._ADULT=np.array([[1.0]+[0.0]*767])
