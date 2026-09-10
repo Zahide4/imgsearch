@@ -4,6 +4,45 @@ The public application runs `server/` on Render. Query text is embedded there;
 Qdrant Cloud stores vectors and metadata. Browsers load images through wsrv.nl.
 `server.py` and `static_site/` are older local/browser experiments, not the Render app.
 
+
+## The vector database (as of 2026-09-10)
+
+Qdrant runs on a Hetzner **CAX21** (4 vCPU, 7.7 GB, 75 GB), not Qdrant Cloud.
+
+```
+https://89-167-20-186.sslip.io:443     <- note the explicit :443
+```
+
+**The port is not optional.** `qdrant_client` appends `:6333` to any URL that
+does not name a port, and 6333 is firewalled. Without `:443` the client times
+out while `curl` on the same URL succeeds, which is a confusing five minutes.
+
+| | |
+|---|---|
+| collection | `images-int8-disk` |
+| config | int8, `always_ram: false`, `on_disk: true` — the Step D winner for a CAX21 |
+| vectors | dense `image` (768) + sparse `bm25` |
+| auth | `QDRANT__SERVICE__API_KEY`, required; unauthenticated requests get 401 |
+| TLS | Caddy, Let's Encrypt via `sslip.io` (no domain purchase) |
+| exposure | Qdrant binds `127.0.0.1` only; ufw allows 22/80/443 and denies 6333 |
+| restart | `~/start-qdrant.sh`, re-run by a `@reboot` crontab (no systemd unit — that needs root) |
+| env | `~/qdrant-env` on the box, mode 600 |
+
+`sslip.io` resolves `89-167-20-186.sslip.io` to `89.167.20.186`, which is what
+lets Let's Encrypt issue a certificate for a bare IP host. If the box is ever
+rebuilt at a different address, the hostname and the Caddyfile change with it.
+
+**Why not Qdrant Cloud any more.** The free cluster filled its disk on
+2026-09-10 during a payload-scoring pass and could not compact its way out:
+recovery needed 873 MiB of temp space and had 547 MiB. It still serves reads,
+so it survives as a spare, but a free tier was never going to hold 10M points.
+
+**Credentials** live in `~/.ssh/qdrant-api-key` on the dev machine, in `.env`,
+and as the `QDRANT_API_KEY` GitHub secret. The previous cloud configuration is
+kept in `.env.cloud-backup`.
+
+---
+
 ## No image corpus on your Mac
 
 Use the **Build searchable cloud corpus** GitHub Actions workflow. Each worker:

@@ -15,3 +15,5 @@ testdrive/origins.txt
 
 # Credentials. Never committed.
 .env
+.env.cloud-backup
+
