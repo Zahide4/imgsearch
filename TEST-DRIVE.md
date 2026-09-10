@@ -641,52 +641,80 @@ the corpus is large enough for it to matter.
 
 ---
 
-## Content safety · REQUIRED BEFORE SHIPPING, not yet built
+## Content safety · BUILT AND CALIBRATED
 
 The 435k corpus contains explicit sexual imagery, gore and graphic medical
-material. Wikimedia Commons is an educational repository with no content
-policy of the kind this product needs, and **enumeration makes the proportion
-worse**: the 435k came from 481 curated topics, while 10M walks the whole
-namespace and surfaces whatever Commons holds.
+material, and enumeration makes it worse: the 435k came from 481 curated
+topics, while 10M walks the whole namespace.
 
-This is a blocker rather than a polish item. Apple's guideline 1.1.4 requires
-filtering plus a reporting mechanism for apps serving user-generated or
-web-sourced content; the app has neither. And a designer searching "anatomy"
-for a client deck should not be shown what that query currently returns.
+**How bad it actually is:** searching this corpus for **"baby being bathed"**
+returns `Ejaculation spurt.jpg` and `Ejakulation in Hand.jpg` in the top 60.
+That is not a hypothetical; it is the current production index.
 
-**The design, cheapest layer first:**
+**What was built**
 
-1. **Commons categories at crawl time.** `iiprop` already fetches
-   `extmetadata`; adding `categories` is nearly free and a blocklist catches
-   the flagrant cases *before* the image is downloaded, saving bandwidth and
-   bucket space. Coverage is inconsistent, so this is a bonus rather than a
-   foundation.
+1. `safety.py` scores each image against SigLIP's text tower -- four prompt
+   groups (`unsafe`, `clinical`, `artistic_nude`, `safe`) using the model's own
+   sigmoid calibration, `sigmoid(117.3 * cos - 12.93)`. One matmul per batch
+   against 28 cached prompt vectors.
+2. `cloud_corpus.py` scores during the crawl, because the vector is already in
+   memory and the standalone build keeps no corpus to revisit.
+3. `server/app.py` filters at query time on `safety`, so the threshold is
+   configuration rather than a re-crawl.
 
-2. **A safety score at embed time, using the model already loaded.** SigLIP
-   has a text tower, and the query path already uses it. Scoring each image
-   against a dozen cached prompt vectors -- "explicit sexual content",
-   "graphic injury", "medical anatomy", against neutral baselines -- is one
-   dot product per image, entirely in embedding space. No second model, no
-   extra download, negligible against GPU throughput. Broadly how LAION
-   filtered their datasets.
+**A formulation error worth remembering.** The first version softmaxed the 28
+prompts at the learned scale of 117. SigLIP trains with a SIGMOID loss, not
+softmax, so that is a hard argmax: a 0.01 cosine gap becomes a 1.17 logit gap.
+It ranked a Berlin protest photo, an Icelandic polling chart, two aircraft and
+a football match above 0.7 "unsafe". Only one of its top twelve was plausibly
+adult content.
 
-3. **Filter at query time, not at ingest.** The score lives in the payload and
-   `server/app.py` excludes above a threshold by default. Changing the
-   threshold is then config, not a re-crawl, and an opt-in toggle stays
-   possible -- which matters, because medical and fine-art searches are
-   legitimate.
+**Calibration** (`testdrive/calibrate_safety.py`). Random sampling cannot do
+this -- 10,000 random rows held 8 text-labelled explicit images. So search FOR
+the hostile material, score what comes back, and measure what legitimate
+searches lose.
 
-**The existing 435k can be scored retroactively** with `embed_manifest.py
---force`: a GPU pass over the bucket rather than another crawl.
+| set | n | median | p75 | max |
+|---|---|---|---|---|
+| hostile queries | 380 | 0.0396 | 0.1933 | 0.9902 |
+| legitimate queries | 719 | 0.000004 | 0.000091 | 0.9251 |
+| random corpus | 3072 | 0.000000 | 0.000002 | 0.9327 |
 
-Two honest limits. No filter is clean -- classical nudes, medical
-illustration and Renaissance violence will trip it, and some genuinely
-explicit material will not. And the threshold is a product decision, not a
-technical one: a tool for commercial creative work should probably filter
-hard and let people opt back in.
+Loss is concentrated exactly where it should be:
 
-Roughly an hour of work: prompt scoring in the embed pass, a payload field, a
-filter in the API, and tuning against real results.
+| search | @0.001 | @0.005 (chosen) |
+|---|---|---|
+| landscape, architecture, street food, war memorial, marble sculpture | 0.0% | **0.0%** |
+| renaissance oil painting | 1.7% | 0.0% |
+| swimwear, butcher shop | 8.3% | 6.7% |
+| surgeon operating | 11.7% | 6.7% |
+| baby being bathed | 18.3% | 10.0% |
+| ballet dancer | 33.3% | 18.3% |
+| human anatomy diagram | 56.7% | 18.3% |
+
+**Threshold: 0.005.** Neutral searches lose nothing at either level. 0.001
+catches more hostile material (86% vs 73%) but costs a third of every "ballet
+dancer" search, too visible a regression for an innocent query. `SAFETY_MAX`
+overrides it; `?include_sensitive=true` bypasses it per request, which medical
+and fine-art searches need.
+
+**Filter semantics: `must_not(safety >= SAFETY_MAX)`, never `must(safety <
+...)`.** A point with no `safety` field fails a positive range condition, and
+the 435k rows crawled before scoring existed carry no such field -- the
+positive form returns an empty index. Verified against the live collection:
+all 435,540 unscored rows pass, a planted 0.9 point is excluded, and
+`include_sensitive` restores it.
+
+**Honest limits.**
+
+* Recall figures are unreliable in both directions. This corpus holds little
+  true pornography, so top hits for "pornographic photograph" are often
+  benign, deflating "catches hostile"; and genuinely explicit images surfaced
+  by innocent queries were counted as "legitimate lost", inflating collateral.
+* The existing 435k are **not scored and therefore not filtered**. They need a
+  scoring pass before this claim means anything for them.
+* Apple guideline 1.1.4 wants filtering *and* a reporting mechanism. The
+  reporting mechanism does not exist.
 
 ---
 

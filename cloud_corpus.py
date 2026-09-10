@@ -394,7 +394,9 @@ async def run(args):
         # already treat it as optional; this was the one place that did not.
         qc = QdrantClient(url=os.environ['QDRANT_URL'],
                           api_key=os.environ.get('QDRANT_API_KEY'), timeout=120)
-        for field, schema in [('build_id', models.PayloadSchemaType.KEYWORD), ('worker', models.PayloadSchemaType.INTEGER)]:
+        for field, schema in [('build_id', models.PayloadSchemaType.KEYWORD),
+                             ('worker', models.PayloadSchemaType.INTEGER),
+                             ('safety', models.PayloadSchemaType.FLOAT)]:
             qc.create_payload_index(COLLECTION, field, field_schema=schema, wait=True)
     checkpoint_key = f'checkpoints/{args.build}-{args.workers}-{args.worker}.json'
 

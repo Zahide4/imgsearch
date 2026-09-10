@@ -48,6 +48,9 @@ def create(client):
         ('license_class', models.PayloadSchemaType.KEYWORD),
         ('build_id', models.PayloadSchemaType.KEYWORD),
         ('worker', models.PayloadSchemaType.INTEGER),
+        # Every query carries a range condition on this, so it needs an index
+        # or Qdrant checks the payload of every candidate it retrieves.
+        ('safety', models.PayloadSchemaType.FLOAT),
     ):
         client.create_payload_index(DESTINATION, field, field_schema=schema, wait=True)
 

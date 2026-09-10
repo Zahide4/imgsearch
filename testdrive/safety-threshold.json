@@ -1,0 +1,8 @@
+{
+  "threshold": 0.005,
+  "hostile_recall": 0.7289473684210527,
+  "legit_loss": 0.055632823365785816,
+  "corpus_removed": 0.0022786458333333335,
+  "n_hostile": 380,
+  "n_legit": 719
+}

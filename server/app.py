@@ -30,6 +30,30 @@ S = {'sess': None, 'tok': None, 'qc': None, 'cache': OrderedDict(),
 _PUNCT = str.maketrans('', '', string.punctuation)
 ALLOWED_LICENSES = {'public_domain', 'attribution', 'share_alike'}
 
+# Commons is an educational repository with no content policy of the kind a
+# creative tool needs, and enumeration makes the proportion worse: the curated
+# prototype came from 481 topics, while the 10M build walks the whole
+# namespace. cloud_corpus.py scores every image against SigLIP's text tower at
+# crawl time and stores the result in `safety`; this is where it takes effect.
+#
+# Calibrated in testdrive/calibrate_safety.py against the corpus's own worst
+# material rather than a guess: search FOR the hostile content, score what
+# comes back, then measure what legitimate searches lose.
+#
+# Loss is concentrated entirely in body-adjacent searches. At this threshold,
+# landscape, architecture, street food, war memorial and marble sculpture lose
+# 0.0% of their results; anatomy and ballet lose 18%. Dropping to 0.001 would
+# catch more (86% of hostile hits rather than 73%) at the cost of a third of
+# every "ballet dancer" search, which is too visible a regression for an
+# innocent query.
+#
+# 0.005 sits far below the hostile median (0.0396) and far below the genuinely
+# explicit images this corpus turned out to contain (0.26 to 0.92).
+#
+# Raise it to filter less, lower it to filter more; include_sensitive=true
+# bypasses it per request.
+SAFETY_MAX = float(os.getenv('SAFETY_MAX', '0.005'))
+
 
 def canon(text):
     return re.sub(r'\s+', ' ', text.lower().translate(_PUNCT)).strip()
@@ -104,6 +128,27 @@ def sparse_query(text):
     return models.Document(text=text, model=SPARSE_MODEL)
 
 
+def search_filter(licenses, include_sensitive):
+    """License and safety conditions for the Qdrant query.
+
+    Safety is expressed as must_not(safety >= SAFETY_MAX) rather than
+    must(safety < SAFETY_MAX), and the difference matters: a point with NO
+    `safety` field fails a `must` range condition and would be dropped. The
+    435k rows crawled before scoring existed carry no such field, so the
+    positive form would return an empty index. Unscored means unfiltered,
+    which is honest -- those rows were never examined.
+    """
+    must = []
+    if licenses:
+        must.append(models.FieldCondition(
+            key='license_class', match=models.MatchAny(any=list(licenses))))
+    must_not = []
+    if not include_sensitive:
+        must_not.append(models.FieldCondition(
+            key='safety', range=models.Range(gte=SAFETY_MAX)))
+    return models.Filter(must=must, must_not=must_not) if (must or must_not) else None
+
+
 def result_from(hit):
     p = hit.payload
     origin = p.get('thumb_origin', '')
@@ -132,7 +177,12 @@ def result_from(hit):
 
 @app.get('/api/search')
 async def search(request: Request, q: str = Query(..., max_length=300),
-                 limit: int = Query(60, ge=1, le=100), license_class: str = ''):
+                 limit: int = Query(60, ge=1, le=100), license_class: str = '',
+                 include_sensitive: bool = Query(
+                     False, description='Return images the safety filter would '
+                                        'exclude. Medical, anatomical and fine-art '
+                                        'searches are legitimate and the filter '
+                                        'cannot tell them apart perfectly.')):
     start = time.perf_counter()
     text = canon(q)
     licenses = tuple(sorted(set(filter(None, license_class.split(',')))))
@@ -142,7 +192,7 @@ async def search(request: Request, q: str = Query(..., max_length=300),
         return {'results': [], 'ms': 0}
     if S['qc'] is None:
         raise HTTPException(503, 'Search is not configured')
-    key = (text, limit, licenses)
+    key = (text, limit, licenses, include_sensitive)
     cached = S['results'].get(key)
     if cached and time.monotonic() - cached[0] < 120:
         S['results'].move_to_end(key)
@@ -154,7 +204,7 @@ async def search(request: Request, q: str = Query(..., max_length=300),
             raise HTTPException(499, 'Search cancelled')
         vector = await asyncio.to_thread(embed, text)
     embedded = time.perf_counter()
-    flt = models.Filter(must=[models.FieldCondition(key='license_class', match=models.MatchAny(any=list(licenses)))]) if licenses else None
+    flt = search_filter(licenses, include_sensitive)
     candidates = max(100, limit * 2)
     dense_prefetch = models.Prefetch(
         query=vector, using='image', limit=candidates, filter=flt,
