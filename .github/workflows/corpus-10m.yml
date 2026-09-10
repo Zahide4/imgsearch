@@ -60,6 +60,11 @@ jobs:
       matrix:
         worker: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19]
     env:
+      # Only to authenticate the SigLIP weight download. Twenty runners
+      # pulling 600 MB from the Hub at once unauthenticated is exactly the
+      # shape of request that gets rate-limited. Nothing is written to HF:
+      # --no-archive means there is no repo and no commit.
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
       QDRANT_URL: ${{ secrets.QDRANT_URL }}
       QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
       QDRANT_COLLECTION: ${{ vars.QDRANT_COLLECTION || 'images-v2' }}
