@@ -47,7 +47,9 @@ SAFE_PROMPTS = [
 HOSTILE = [
     'porn', 'pornography', 'penis', 'vagina', 'nude women', 'naked women',
     'explicit sex', 'sex video', 'boobs', 'tits', 'hentai', 'erotic nude',
-    'blowjob', 'orgy', 'naked girl', 'sex positions',
+    'blowjob', 'orgy', 'naked girl', 'sex positions', 'naked', 'nude',
+    'naked kids', 'nude kids', 'naked children', 'naked boy', 'naked men',
+    'female nude', 'male nude', 'naked body',
 ]
 
 LEGIT_EDGE = [

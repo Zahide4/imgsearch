@@ -54,12 +54,14 @@ ALLOWED_LICENSES = {'public_domain', 'attribution', 'share_alike'}
 #      overwhelmingly the slur/slang, and the refusal message offers
 #      recourse. Two legit phrases are carved out in REFUSAL_EXCEPTIONS
 #      instead of dropping their terms. Tune from the refusal log, not taste.
-#   2. Cosine backstop at 0.85: catches paraphrases ("naked girl" 0.8699,
-#      "explicit sex" 0.9332) with zero legitimate refusals on the 27-query
-#      battery (legit max 0.8303). Re-run the calibrator at any model swap.
+#   2. Cosine backstop at 0.845: catches paraphrases ("naked girl" 0.8699,
+#      "explicit sex" 0.9332, bare "naked" 0.8493) with zero legitimate
+#      refusals on the 27-query battery (legit max 0.8303 -- margin 0.015,
+#      thin; watch the refusal log for false positives). Re-run the
+#      calibrator at any model swap.
 REFUSAL_MESSAGE = ("We don't have that as it's NSFW. "
                    "If your query is falsely flagged, let us know.")
-REFUSAL_COSINE = 0.85
+REFUSAL_COSINE = 0.845
 REFUSAL_CORE = frozenset({
     # Explicit sexual content: industry, anatomy, acts, paraphilias, sites.
     'porn', 'porno', 'pornography', 'pornographic', 'pornhub', 'xvideos',
@@ -85,6 +87,16 @@ REFUSAL_CORE = frozenset({
     'honky', 'honkies',
     'faggot', 'faggots', 'dyke', 'dykes',
     'retard', 'retarded',
+    # Naked/nude phrases: bare "naked"/"nude" can never be core terms (they
+    # would nuke "classical nude sculpture"), so the exact complaint shapes
+    # are listed explicitly while the cosine backstop (0.845) holds the bare
+    # words ("naked" calibrates at 0.8493). Child combinations are explicit
+    # unconditionally: no cleverness where minors are concerned.
+    'naked kids', 'nude kids', 'naked children', 'nude children',
+    'naked child', 'nude child', 'naked baby', 'nude baby',
+    'naked boy', 'nude boy', 'naked girl', 'nude girl',
+    'naked teen', 'nude teen', 'naked women', 'nude women',
+    'naked men', 'nude men', 'naked body', 'female nude', 'male nude',
 })
 # Whole-word terms with one legitimate phrase each. The term still fires
 # everywhere else; the phrase passes. ("sperm whale" is Class B fauna;

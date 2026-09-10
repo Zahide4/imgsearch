@@ -223,6 +223,15 @@ class RefusalTests(unittest.IsolatedAsyncioTestCase):
             r=await self.client.get('/api/search',params={'q':q})
             self.assertEqual(r.json().get('refusal'),api.REFUSAL_MESSAGE,msg=q)
 
+    async def test_naked_phrases_refused_as_core_terms(self):
+        for q in ['naked kids','nude kids','naked children','nude boy',
+                  'naked girl','naked women','nude men','female nude']:
+            r=await self.client.get('/api/search',params={'q':q})
+            self.assertEqual(r.json().get('refusal'),api.REFUSAL_MESSAGE,msg=q)
+
+    async def test_backstop_threshold_is_calibrated_value(self):
+        self.assertEqual(api.REFUSAL_COSINE, 0.845)
+
     async def test_legit_phrases_and_nonmatches_pass(self):
         for q in ['sperm whale','spic and span cleaning','niger river',
                   'fire retardant drop','ritz cracker','titmouse',
