@@ -1,0 +1,1226 @@
+# Topics for the 10M build. 1121 topics, every one measured against
+# Commons before it was allowed in.
+#
+# MEASURED 2,115 candidate strings via list=search totalhits (filetype:bitmap).
+# The previous 1,200-topic draft had a median of 919 hits and 50% of its topics
+# under 1,000 -- it projected to ~3.5M indexed, not 10M, because Cirrus ANDs
+# terms and a 3-4 word phrase retrieves almost nothing ("silicon wafer rainbow"
+# = 1 file, "anechoic chamber wedges" = 1). Topics under 2,000 hits were
+# replaced with measured alternatives in the same section.
+# Projection with the same model: 3,530,221 -> 9,735,973 indexed.
+#
+# HOW TO ADD A TOPIC: measure it first. Anything under 2,000 bitmap hits is
+# not worth a crawl slot. Prefer one- and two-word concrete nouns; Commons is
+# deep on places, species, buildings, vehicles and objects, and shallow on
+# art-directed scene descriptions.
+#
+# DEPTH IS NOT CAPPED AT 10,000. The search API refuses offsets past 10k, but
+# filew: shards a query disjointly -- measured: sunset+CC-Zero = 21,179, of
+# which filew:>3000 = 17,186 and filew:<3000 = 4,193. Split any (topic,licence)
+# shard by width band until each piece is under 10k and the whole clean pool is
+# reachable. Licence categories shard it 8 ways first (see allocation.html 6).
+#
+# Class F (F1/F2) is EXEMPT from the hits floor: those topics are harvested from
+# Openverse/Flickr/Rawpixel, not Commons, so a Commons hit count says nothing
+# about them (allocation.html 7 measured Commons plates supply at ~zero).
+#
+# Supersedes seeds.txt (written for a 25k prototype) for everything 10M.
+# Grouped by allocation class (11); class targets are spending caps (12):
+# write topics until each class has enough, then let the relevance gate (13)
+# decide how deep each one goes. Bucket sizes are budgets, not quotas (5).
+#
+# Rules: concrete search strings, lowercase ASCII, single spaces, no modifier
+# cross-product ('forest' + 'forest macro' return overlapping results and waste
+# budget). Proper nouns are wanted (hybrid BM25 beats dense-only on names).
+# Class C is PD-framed (dead 100+ years, pre-1930s decades) to suit its licence
+# shard; the shard still filters, topics only lean.
+# The cutouts section of seeds.txt is dropped entirely (10: refuse the cutout).
+
+# --- A1 natural landscape and wilderness (class A, target share 3.4M) ---
+forest
+mountain range
+mountain lake
+alpine meadow
+wildflower meadow
+ocean waves
+sea stack
+sea arch
+desert dunes
+river
+mekong river
+amazon river
+danube river
+waterfall
+canyon
+glacier
+ice cave
+volcano
+lava field
+crater lake
+hot spring
+geyser
+cave
+sinkhole cenote
+cliff
+loch ness
+lake como
+coral reef
+rainforest
+mangrove forest
+savanna
+prairie
+wetland
+swamp
+tundra
+badlands
+fjord
+redwood forest
+bamboo forest
+birch forest
+cherry blossom
+autumn foliage
+lavender field
+tulip fields
+sunflower field
+wheat field
+rice terraces
+tea plantation
+vineyard
+bluebell woods
+matterhorn
+mount fuji
+table mountain
+dolomites
+swiss alps
+scottish highlands
+lofoten islands
+faroe islands
+patagonia
+torres del paine
+banff national park
+yellowstone
+yosemite valley
+zion canyon
+bryce canyon
+antelope canyon
+grand canyon
+niagara falls
+victoria falls
+plitvice lakes
+atacama desert
+namib desert
+wadi rum
+cappadocia
+ha long bay
+great ocean road
+maldives island
+white sands
+siwa oasis
+oasis
+mountain pass
+country lane
+moorland
+northern lights
+frozen lake
+gorge
+pack ice
+olive grove
+estuary
+mesa
+atoll
+steppe
+hay bale
+hot desert
+heathland
+marshland
+peat bog
+sand dune
+plateau
+terraced field
+hoarfrost
+salt lake
+lagoon
+lava flow
+avalanche
+salt flat
+dew
+volcanic crater
+
+# --- A2 cities streets architecture interiors (class A) ---
+city skyline night
+old town street
+neon signs
+street market
+rooftop view
+rooftop garden
+harbour
+railway yard
+railway station hall
+subway station
+tram street
+lisbon tram
+stone bridge
+covered bridge
+suspension bridge
+castle
+fortress
+citadel
+temple courtyard
+courtyard house
+church facade
+gothic cathedral
+cathedral interior
+baroque church
+monastery
+pagoda
+timber frame house
+thatched cottage
+shophouses
+fire escape
+graffiti wall
+billboard
+street lamp
+manhole cover
+phone booth
+bus stop
+crosswalk
+construction site
+parking garage
+public square
+fountain plaza
+opera house
+museum gallery
+library interior
+grand staircase
+spiral staircase
+archway
+colonnade
+dome interior
+stained glass window
+tulou building
+stilt houses
+houseboat
+lighthouse
+windmill
+water tower
+grain silo
+factory floor
+warehouse
+greenhouse
+market hall
+onsen bath
+ice hotel
+stepwell
+observatory
+control room
+cockpit
+theatre stage
+classroom
+wine cellar
+artist studio
+blacksmith forge
+pottery studio
+weaving workshop
+kitchen hearth
+brutalist building
+art deco building
+skyscraper
+stadium
+aqueduct
+amphitheatre
+ancient ruins
+roman forum
+stone circle
+colosseum
+st peters basilica
+notre dame interior
+mont saint michel
+neuschwanstein castle
+edinburgh castle
+tower of london
+kremlin walls
+red square
+saint basils cathedral
+topkapi palace
+luxor temple
+abu simbel
+great wall
+forbidden city
+temple of heaven
+potala palace
+angkor wat
+bagan temples
+taj mahal
+mehrangarh fort
+red fort delhi
+golden temple
+qutub minar
+humayuns tomb
+lake palace
+khajuraho temples
+hong kong harbour
+gardens by the bay
+sydney opera house
+sydney harbour bridge
+venice canal
+florence duomo
+leaning tower of pisa
+seville plaza
+eiffel tower
+montmartre street
+london bridge
+big ben
+tower bridge
+dublin temple bar
+amsterdam canals
+bruges belfry
+grand place brussels
+cologne cathedral
+heidelberg castle
+berlin cathedral
+vienna belvedere
+prague old square
+prague castle
+budapest parliament
+krakow square
+athens acropolis
+cairo pyramids
+giza sphinx
+tunis medina
+algiers casbah
+rio de janeiro
+christ the redeemer
+havana street
+havana malecon
+machu picchu
+cusco street
+new york skyline
+times square
+brooklyn bridge
+golden gate bridge
+new orleans french quarter
+route 66 sign
+las vegas strip
+mexico city zocalo
+chichen itza
+window frame
+half timbered house
+department store
+school building
+corridor
+railway bridge
+doorway
+city wall
+narrow alley
+barn
+bench
+town hall
+villa
+hospital building
+university campus
+pier
+city square
+office interior
+metro station
+row houses
+abbey
+promenade
+cloister
+art nouveau facade
+museum interior
+waterfront
+marina
+motorway
+farmhouse
+roundabout
+airport terminal
+bell tower
+courthouse
+park path
+city gate
+boardwalk
+arcade
+viaduct
+chimney
+tram stop
+apartment block
+basement
+canal city
+clock tower
+shop front
+level crossing
+attic
+shipyard
+palace interior
+stupa
+shutters
+statue square
+church dome
+watermill
+ballroom
+minaret
+roof tiles
+concert hall
+restaurant interior
+industrial estate
+townhouse
+glass facade
+rose window
+bandstand
+suburban street
+theatre interior
+awning
+mosque courtyard
+cobblestone street
+mosaic floor
+bar interior
+neon sign
+dry dock
+hotel lobby
+watchtower
+marble column
+tunnel entrance
+factory interior
+courtyard garden
+wrought iron gate
+shrine gate
+
+# --- A3 named places overflow shelf (class A) ---
+# City-by-city, monument-by-monument: BM25 wins on proper nouns. Thin or
+# filler entries were cut; what remains is photographed enough to retrieve.
+bangkok grand palace
+kathmandu durbar square
+bom jesus basilica
+sanaa old city
+leptis magna
+dakar goree island
+zanzibar stone town
+ngorongoro crater
+stockholm
+naples
+copenhagen
+amman
+cape town
+zurich
+milan
+casablanca
+porto
+tallinn
+helsinki
+sahara
+oslo
+salzburg
+istanbul
+lagos
+kyoto
+sofia
+alexandria
+bucharest
+riga
+ljubljana
+bratislava
+hampi
+alhambra
+belgrade
+granada
+petra
+yerevan
+sagrada familia
+galapagos
+isfahan
+baku
+himalaya
+tbilisi
+nairobi
+zagreb
+dubrovnik
+shiraz
+odessa
+
+# --- A4 weather sky aerials (class A) ---
+thunderstorm
+lightning
+storm clouds
+fog
+mist
+heavy rain
+rainbow
+sunset
+sunrise
+golden hour field
+blue hour city
+storm light
+crepuscular rays
+blizzard
+hail
+frost
+icicles
+aurora borealis
+lunar eclipse
+aerial forest
+aerial river
+aerial mountains
+aerial highway
+aerial harbour
+top down city
+satellite view
+birds eye view
+aerial view
+altocumulus
+drought
+flood
+cirrus cloud
+snowstorm
+aerial city
+tornado
+drone view
+storm cloud
+twilight
+hailstorm
+
+# --- B1 animals and wildlife, gated iconic only (class B, share 2.15M) ---
+# No taxonomic sweep: specimen photography is the trap. Iconic species,
+# Pexels-evergreen pets, action and macro framings. Prefer Quality members.
+dog
+labrador retriever
+german shepherd
+cat
+tabby cat
+wolf
+fox
+bear
+tiger
+lion
+leopard
+elephant
+giraffe
+zebra
+rhino
+hippo
+panda
+kangaroo
+turtle
+eagle
+owl
+hummingbird
+flamingo
+peacock
+kingfisher
+puffin
+penguin
+butterfly
+bee
+dragonfly
+spider
+frog
+snake
+lizard
+crab
+starfish
+jellyfish
+octopus
+shark
+whale
+fish school
+seahorse
+crocodile
+tadpole
+bird flock murmuration
+coral fish
+manta ray
+koala
+goose
+horse
+seal
+robin
+cow
+swan
+sheep
+ant
+bison
+falcon
+pig
+deer
+monkey
+duck
+beetle
+rabbit
+tortoise
+moose
+goat
+crow
+jaguar
+elk
+heron
+dolphin
+sparrow
+
+# --- B2 food and drink, dish first (class B) ---
+# Coffee dies at rank ~1000: many narrow topics, not few broad ones.
+pizza
+burger
+pho soup
+pad thai
+dim sum basket
+dumplings
+fried rice
+tacos al pastor
+croissant
+baguette
+fish and chips
+satay skewers
+korean fried chicken
+chinese hot pot
+fruit tart
+cheese board
+jam
+kebab
+waffle
+herbs
+grape harvest
+tea ceremony
+banquet
+berries
+honey
+pastry
+sandwich
+bread
+cake
+mushroom
+apple orchard
+potato
+picnic
+brewery
+spices
+chocolate
+porridge
+food market
+whisky
+chili pepper
+curry
+grilled meat
+tomato
+onion
+mortar and pestle
+cutlery
+citrus fruit
+butcher shop
+ice cream
+noodles
+fish market
+salad
+sushi
+charcuterie
+pasta
+farmers market
+cocktail
+tapas
+ramen
+garlic
+taco
+paella
+pancakes
+grocery store
+food truck
+dinner table
+dumpling
+espresso
+street food india
+beer glass
+donut
+wine glass
+churros
+gelato
+brunch
+rice dish
+coffee beans
+kitchen counter
+samosa
+
+# --- B3 plants flowers garden, gated (class B) ---
+oak tree
+fern frond
+cactus
+palm tree
+rose bloom
+poppy field
+dandelion clock
+lotus flower
+water lily pads
+bird of paradise flower
+sunflower head
+fly agaric
+pine cone
+acorn caps
+english garden
+botanical garden
+orchid
+maple leaf
+iris
+lichen
+daisy
+japanese garden
+autumn leaves
+magnolia
+dahlia
+herb garden
+succulent
+peony
+bonsai
+hydrangea
+jasmine
+seaweed
+bougainvillea
+
+# --- B4 transport and machines (class B) ---
+steam locomotive
+double decker bus
+fire engine
+tractor ploughing
+combine harvester
+cargo ship deck
+fishing boat harbour
+sailing ship rigging
+gondola venice
+electric car charging
+helicopter rescue
+rocket launch pad
+engine room
+clockwork movement
+catamaran
+rowing boat
+submarine
+motorcycle
+bicycle
+ferry
+airship
+taxi
+tugboat
+crane
+school bus
+kayak
+dinghy
+freight train
+canoe
+cargo plane
+ambulance
+high speed train
+camper van
+excavator
+police car
+scooter
+caravan
+hot air balloon
+sports car
+vintage car
+hovercraft
+glider
+tall ship
+paddle steamer
+seaplane
+jet airliner
+dump truck
+bulldozer
+rickshaw
+forklift
+biplane
+sidecar
+
+# --- B5 objects tools instruments (class B) ---
+# Serve the object on plain ground where it exists; never a cutout bucket.
+backpack trail
+compass map
+globe library
+vinyl record player
+violin bow
+trumpet brass
+saxophone jazz
+tabla drums
+microphone stage
+level tool
+film camera
+fishing net
+key
+coin
+stamp
+piano
+saddle
+easel
+watering can
+inkwell
+sextant
+harp
+plane tool
+paintbrush
+lantern
+drum
+padlock
+saw
+hammer
+guitar
+scroll
+candle
+anvil
+kiln
+gramophone
+spindle
+microscope
+horseshoe
+palette
+playing cards
+weaving loom
+wheelbarrow
+sewing machine
+accordion
+quill
+oil lamp
+scissors
+chisel
+typewriter
+bellows
+wrench
+book stack
+hourglass
+spinning wheel
+pocket watch
+chess set
+
+# --- C1 painting drawing print, PD-framed (class C, share 2.3M, PD only) ---
+# Named artists dead 100+ years or genres; the licence shard filters, topics lean.
+botticelli primavera
+ghent altarpiece
+caravaggio judith
+rembrandt self portrait
+rubens descent
+el greco toledo
+gainsborough blue boy
+manet olympia
+gauguin tahiti
+van gogh starry night
+van gogh sunflowers
+morisot cradle
+sisley frost
+bierstadt yosemite
+hiroshige fifty three stations
+japanese woodblock print
+still life painting
+flower still life
+vanitas skull
+etching
+genre painting
+landscape painting
+watercolour landscape
+engraving
+bas relief
+illuminated initial
+lithograph
+pastel drawing
+icon painting
+history painting
+pen and ink drawing
+oil painting portrait
+fresco
+religious painting
+portrait miniature
+baroque painting
+tapestry
+woodcut
+ivory carving
+triptych
+silhouette portrait
+ukiyo-e
+diptych
+bronze statue
+art deco design
+marble sculpture
+renaissance painting
+aquatint
+chiaroscuro
+mezzotint
+charcoal drawing
+impressionist painting
+roman mosaic
+porcelain vase
+netsuke
+dutch golden age painting
+majolica
+persian miniature
+bauhaus design
+delftware
+byzantine mosaic
+art nouveau print
+mughal miniature
+
+# --- C2 historical documentary photography (class C) ---
+daguerreotype portrait
+tintype soldier
+glass negative street
+civil war soldier portrait
+golden spike locomotives
+berlin potsdamer platz
+war photograph
+old church photograph
+prohibition
+black and white portrait
+factory workers
+home front
+old school photograph
+carte de visite
+historic bridge photograph
+civil rights march
+old railway photograph
+glass plate negative
+coal mine
+railway construction
+old panorama
+old mill photograph
+old market photograph
+early automobile
+old aerial photograph
+old newspaper page
+old military portrait
+stereograph
+old hospital photograph
+market day
+steel mill
+cyanotype
+old street scene
+old factory photograph
+great depression
+moon landing
+old wedding photograph
+historic street scene
+early aviation
+historic shopfront
+edwardian street
+ambrotype
+early telephone
+suffragette
+trench warfare
+
+# --- C3 posters advertising ephemera patents (class C) ---
+vaudeville poster
+i want you poster
+tin label
+postcard
+propaganda poster
+travel poster
+railway poster
+patent drawing
+film poster
+book cover design
+trade card
+sheet music cover
+election poster
+theatre poster
+seed catalogue
+technical illustration
+wanted poster
+exhibition poster
+automobile advertisement
+recruitment poster
+enamel sign
+advertising card
+railway timetable
+matchbox label
+
+# --- C4 manuscripts botanical plates decorative maps (class C, capped) ---
+book of hours calendar
+ptolemy world map
+first folio hamlet
+egyptian hieroglyphs wall
+anatomical plate
+antique map
+city plan
+botanical illustration
+medieval manuscript
+zoological illustration
+music manuscript
+nautical chart
+sanskrit manuscript
+psalter
+astronomical chart
+mineral illustration
+gospel manuscript
+quran manuscript
+palm leaf manuscript
+entomology plate
+celestial atlas
+ornithology plate
+bestiary
+
+# --- D1 faiths rites holy practice (class D, share 900k, raised from 550k) ---
+# Highest demand-to-supply-elsewhere ratio measured; Commons is deep here.
+church congregation
+wat pho reclining buddha
+temple chariot procession
+temple bell
+synagogue
+nun
+altar
+meditation
+church nave
+baptism
+wedding ceremony
+funeral rites
+imam
+monk prayer
+buddhist monk
+pilgrimage
+prayer beads
+temple interior
+
+# --- D2 festivals calendar (class D) ---
+durga puja pandal
+christmas market stalls
+rio carnival samba
+mardi gras beads
+day of the dead ofrenda
+parade
+water festival
+lunar new year
+easter procession
+folk dance
+traditional music
+harvest festival
+thanksgiving
+ramadan
+pongal
+holi
+onam
+hanukkah
+eid al fitr
+diwali
+passover
+oktoberfest
+purim
+eid al adha
+
+# --- D3 dress ritual objects (class D) ---
+sari draping
+kolam rice flour
+mask
+kilt
+jewellery
+headdress
+traditional costume
+embroidery
+turban
+kimono obi
+hijab
+
+# --- E1 space missions and bodies (class E, share 550k, PD by statute) ---
+# NASA/ESA/JAXA/ISRO are public domain; commercial providers are avoided
+# (SpaceX releases are mostly CC BY-NC -- a licence trap, so no SpaceX topics).
+apollo launch
+blue marble photo
+hubble telescope servicing
+saturn rings cassini
+mars landscape
+space telescope
+astronaut
+planet surface
+space station
+comet
+solar eclipse
+moon surface
+
+# --- E2 deep sky named objects (class E) ---
+andromeda galaxy
+orion nebula
+crab nebula
+pillars of creation
+helix nebula eye
+pleiades star cluster
+earth from orbit
+city lights at night
+
+# --- E3 earth observation from orbit (class E) ---
+earth from space night
+hurricane from space
+volcano eruption satellite
+aurora from iss
+
+# --- E4 anatomy and medical imaging (class E) ---
+laboratory experiment
+power plant
+particle accelerator
+petri dish
+wind turbine
+scientific instrument
+solar panel
+spectrometer
+radio telescope
+test tube
+clean room
+
+# --- E5 microscopy and bench science (class E) ---
+# No microscope/test-tube/beaker/periodic-table strings: B5 holds those objects.
+centrifuge spinning
+plant cell
+fossil
+weather station
+electron micrograph
+crystal formation
+fungal spore
+meteorite
+tissue section
+blood cells
+mineral thin section
+
+# --- E6 engineering energy physics (class E) ---
+bridge engineering
+circuit board
+dam
+generator
+canal lock
+gear mechanism
+steam engine
+mine headframe
+transformer
+vacuum tube
+
+# --- F1 plates merged from testdrive/plates-topics.txt (class F, 500k) ---
+# The plates pilot PASSED eye review (clearly usable), so the bucket stays
+# 500k and these 100 verified topics carry straight into the 10M list,
+# plus 12 gaps filled below. Textures/absorbed seeds sections live ONLY here.
+concrete texture
+paper texture
+wood grain
+bokeh
+smoke black
+water splash
+rust texture
+fabric texture
+marble texture
+film grain
+light leak
+fire flames
+brick texture
+plaster texture
+stone texture
+metal texture
+leather texture
+canvas texture
+linen texture
+denim texture
+burlap texture
+silk texture
+velvet texture
+knitted texture
+carpet texture
+woven texture
+cardboard texture
+parchment
+crumpled paper
+torn paper
+newspaper texture
+watercolor paper
+aged paper
+scratched metal
+brushed steel
+copper patina
+peeling paint
+cracked paint
+paint splatter
+watercolor wash
+ink splash
+ink water
+acrylic texture
+oil paint texture
+chalk texture
+charcoal texture
+grunge texture
+distressed texture
+scratches
+dust particles
+film scratches
+halftone texture
+noise texture
+gradient background
+abstract waves
+prism light
+lens flare
+light rays
+sparkles
+sparks
+embers
+fireworks
+smoke plume
+colored smoke
+mist background
+steam black
+rain glass
+water droplets
+condensation
+water ripples
+water reflection
+ocean foam
+soap bubbles
+ice texture
+frost texture
+snow texture
+sand texture
+soil texture
+gravel texture
+bark texture
+moss texture
+leaf texture
+rock texture
+slate texture
+granite texture
+terrazzo texture
+tiles texture
+asphalt texture
+wood planks
+wood rings
+rope texture
+mesh texture
+glass texture
+stained glass
+gold foil
+aluminum foil
+glitter texture
+confetti
+rainbow light
+shadow pattern
+
+# --- F2 plate gaps filled (class F) ---
+travertine texture
+terracotta tiles
+
+# --- G people and daily life, documentary only (class G, share 200k, 2%) ---
+# Deliberately small: modern corporate stock does not exist under a free
+# licence and CC never conveys a model release. People arrive incidentally
+# in A/C/D; this shelf is street, work and play only. Faces get a release
+# warning at serve time (still owed before ship).
+street vendor cart
+flamenco dancer
+surfer
+climber
+potter at wheel
+weaver loom shuttle
+teacher
+runners
+librarian
+sailor at work
+cyclists
+farmer
+crowd
+carpenter
+baker
+construction worker
+nurse
+swimmers
+firefighter
+electrician
+musician street
+miner
+children playing
+commuters
+mechanic
+fisherman
+market trader
+tailor
+hands working
+shoemaker
