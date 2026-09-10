@@ -123,6 +123,32 @@ class Scorer:
         return {name: probability[:, lo:hi].max(axis=1)
                 for name, lo, hi in self.spans}
 
+    def save(self, path):
+        """Freeze the prompt matrix so scoring needs no model.
+
+        Building the matrix needs SigLIP's text tower; USING it is a matmul.
+        Separating the two means the scoring pass can run on a 4-core box with
+        numpy and nothing else -- no torch wheel, no 600 MB download, and no
+        pulling 1.3 GB of vectors across the network to a machine that has
+        torch.
+        """
+        names = [n for n, _, _ in self.spans]
+        np.savez(path, text=self.text, names=np.array(names),
+                 lo=np.array([l for _, l, _ in self.spans]),
+                 hi=np.array([h for _, _, h in self.spans]),
+                 scale=np.float64(self.scale), bias=np.float64(self.bias))
+
+    @classmethod
+    def from_file(cls, path):
+        """Rebuild a scorer from a frozen matrix. numpy only."""
+        d = np.load(path, allow_pickle=False)
+        self = cls.__new__(cls)
+        self.text = d['text']
+        self.spans = list(zip([str(n) for n in d['names']],
+                              d['lo'].tolist(), d['hi'].tolist()))
+        self.scale, self.bias = float(d['scale']), float(d['bias'])
+        return self
+
     def payload(self, vectors):
         """Per-image dicts ready to merge into a Qdrant payload."""
         scored = self.score(vectors)

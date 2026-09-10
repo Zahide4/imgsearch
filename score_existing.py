@@ -25,8 +25,11 @@ import numpy as np
 from qdrant_client import QdrantClient, models
 
 import safety
-import cloud_corpus
-COLLECTION = os.getenv('QDRANT_COLLECTION', cloud_corpus.COLLECTION)
+# Imported lazily. cloud_corpus pulls in httpx and Pillow, which a box that
+# only scores vectors has no reason to install.
+COLLECTION = os.getenv('QDRANT_COLLECTION')
+if not COLLECTION:
+    from cloud_corpus import COLLECTION
 
 
 def main():
@@ -34,12 +37,19 @@ def main():
     ap.add_argument('--limit', type=int, default=0, help='0 = whole collection')
     ap.add_argument('--batch', type=int, default=512)
     ap.add_argument('--dry-run', action='store_true')
+    ap.add_argument('--prompts', help='frozen prompt matrix (.npz) from '
+                                      'safety.Scorer.save; skips torch entirely')
     a = ap.parse_args()
 
-    import open_clip
-    print('loading SigLIP text tower...', flush=True)
-    model, _, _ = open_clip.create_model_and_transforms('ViT-B-16-SigLIP', pretrained='webli')
-    scorer = safety.Scorer(model.eval(), open_clip.get_tokenizer('ViT-B-16-SigLIP'))
+    if a.prompts:
+        # Frozen prompt matrix: numpy only, no torch, no model download.
+        scorer = safety.Scorer.from_file(a.prompts)
+        print(f'loaded {scorer.text.shape[0]} prompt vectors from {a.prompts}', flush=True)
+    else:
+        import open_clip
+        print('loading SigLIP text tower...', flush=True)
+        model, _, _ = open_clip.create_model_and_transforms('ViT-B-16-SigLIP', pretrained='webli')
+        scorer = safety.Scorer(model.eval(), open_clip.get_tokenizer('ViT-B-16-SigLIP'))
 
     qc = QdrantClient(url=os.environ['QDRANT_URL'],
                       api_key=os.environ.get('QDRANT_API_KEY'), timeout=180)
