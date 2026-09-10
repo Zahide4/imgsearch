@@ -7,7 +7,6 @@ import string
 import time
 from collections import OrderedDict
 from pathlib import Path
-from urllib.parse import quote
 
 import numpy as np
 import onnxruntime as ort
@@ -115,7 +114,15 @@ def result_from(hit):
     if thumb and not thumb.startswith('http'):
         thumb = sign(thumb)
     if not thumb and origin:
-        thumb = 'https://wsrv.nl/?url=' + quote(origin, safe='') + '&w=384&h=384&fit=inside&output=webp&q=80&maxage=1y'
+        # thumb_origin is Wikimedia's OWN 384px thumbnail: the API generated
+        # it at crawl time via iiurlwidth=384 and serves it from their CDN.
+        # There is nothing left to resize, so putting wsrv.nl in front of it
+        # only adds a free third party that has already broken serving once
+        # and rate-limited us for warming it.
+        #
+        # The standalone 10M build stores no derivative of its own, so this is
+        # not a fallback there -- it is the thumbnail.
+        thumb = origin
     return dict(id=p.get('image_id'), title=p.get('title', ''), creator=p.get('creator', ''),
                 license=p.get('license', ''), license_class=p.get('license_class', ''),
                 license_url=p.get('license_url', ''), source_url=p.get('source_url', ''),

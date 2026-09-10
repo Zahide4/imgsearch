@@ -83,28 +83,44 @@ class Scorer:
             text = model.encode_text(tokens)
             text = text / text.norm(dim=-1, keepdim=True)
         self.text = text.float().cpu().numpy().astype(np.float32)
-        # SigLIP trains with a learned temperature; reusing it keeps the
-        # softmax on the scale the model was calibrated at rather than one
-        # invented here.
-        self.scale = float(model.logit_scale.exp().detach().cpu()) if hasattr(
-            model, 'logit_scale') else 100.0
+        # SigLIP is trained with a SIGMOID loss, not softmax: each
+        # image-text pair is scored independently as
+        # sigmoid(scale * cos + bias). Both numbers are learned, so using
+        # them gives a calibrated per-prompt probability for free.
+        #
+        # The first version of this used a softmax across all 28 prompts at
+        # the same scale, and it was worthless: 117 x a 0.01 cosine gap is a
+        # 1.17 logit gap, so softmax became a hard argmax and any image whose
+        # nearest prompt happened to be an unsafe one scored ~1.0. It ranked
+        # polling charts, aircraft and a football match above 0.7.
+        self.scale = float(model.logit_scale.exp().detach().cpu())
+        self.bias = float(model.logit_bias.detach().cpu()) if hasattr(
+            model, 'logit_bias') else 0.0
 
     def score(self, vectors):
         """Image vectors (N, 768), L2-normalised, in the same space.
 
-        Returns a dict of (N,) arrays, one per group, each the softmax
-        probability mass that group attracts. `unsafe` is the number the API
-        filters on; the others are kept because they are the ones a human has
-        to look at when tuning the threshold.
+        Returns a dict of (N,) arrays, one per group: the HIGHEST calibrated
+        probability any prompt in that group assigns to the image. Max rather
+        than sum, because the groups are not mutually exclusive and a sum over
+        seven unsafe prompts would punish an image for being vaguely near all
+        of them rather than clearly matching one.
         """
         vectors = np.asarray(vectors, dtype=np.float32)
         if vectors.ndim == 1:
             vectors = vectors[None, :]
-        logits = self.scale * (vectors @ self.text.T)
-        logits -= logits.max(axis=1, keepdims=True)      # stable softmax
-        probability = np.exp(logits)
-        probability /= probability.sum(axis=1, keepdims=True)
-        return {name: probability[:, lo:hi].sum(axis=1)
+        # numpy's matmul raises spurious divide/overflow/invalid flags under
+        # Apple's Accelerate BLAS even when both operands are finite, and this
+        # runs once per batch for thirty hours across twenty workers. Silence
+        # the false alarm, then check the result properly -- a real NaN here
+        # would write a safety score of nan into the payload, and every
+        # comparison against a threshold would quietly be False.
+        with np.errstate(divide='ignore', over='ignore', invalid='ignore'):
+            logits = self.scale * (vectors @ self.text.T) + self.bias
+            probability = 1.0 / (1.0 + np.exp(-np.clip(logits, -60, 60)))
+        if not np.isfinite(probability).all():
+            raise RuntimeError('Non-finite safety score; refusing to label')
+        return {name: probability[:, lo:hi].max(axis=1)
                 for name, lo, hi in self.spans}
 
     def payload(self, vectors):

@@ -1,0 +1,99 @@
+name: 10M corpus (standalone, no storage)
+
+# The 10M build. Each runner crawls Commons, embeds with SigLIP on its own
+# CPU, scores for safety, and upserts straight to Qdrant. Nothing is parked
+# anywhere in between, so this needs no bucket, no HuggingFace repo, no egress
+# allowance and no payment method.
+#
+# Measured on this hardware (4 vCPU, AMD EPYC 7763):
+#
+#   crawl only          5.4 img/s per runner
+#   SigLIP forward      4.8 img/s per runner at 2 threads (4.2 at four)
+#   coupled             4.6 img/s overlapped, 2.5 img/s if nothing overlaps
+#
+#   10M on 20 runners   30 h overlapped, 56 h worst case
+#
+# The browser is served Wikimedia's own 384px thumbnail, which every row
+# already carries as `thumb_origin` -- the API generated it during the crawl.
+# Storing a second copy was costing 229 GB to duplicate a better CDN.
+#
+# RESUMING: re-run with the same `build`. Each worker reads its cursor from
+# Qdrant, counts what it has already indexed, and continues. A job that hits
+# the 6-hour ceiling loses nothing. Expect roughly six runs for the full 10M.
+
+on:
+  workflow_dispatch:
+    inputs:
+      build:
+        description: Build identifier; reuse the same value to resume
+        default: commons-10m
+        required: true
+      target_per_worker:
+        description: >-
+          CUMULATIVE images per worker, not per run. 500000 x 20 = 10M; a
+          worker that already has that many exits immediately.
+        default: '500000'
+        required: true
+      max_seconds:
+        description: Wall clock per job, under the 6 h runner ceiling
+        default: '16200'
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: corpus-10m
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      # 20 concurrent jobs is the GitHub Free ceiling, and each runner has its
+      # own IP -- which is the point. The per-host rate limit that throttles
+      # one machine applies per address, so this is 20 polite crawlers rather
+      # than one impolite one.
+      max-parallel: 20
+      matrix:
+        worker: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19]
+    env:
+      QDRANT_URL: ${{ secrets.QDRANT_URL }}
+      QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+      QDRANT_COLLECTION: ${{ vars.QDRANT_COLLECTION || 'images-v2' }}
+      # Not 's3'. storage.enabled() is then false and upload_batch no-ops, so
+      # no credential can lead to an accidental upload from this workflow.
+      STORAGE_BACKEND: none
+      CRAWL_UA: ImgSearch/0.2 (https://github.com/Zahide4/imgsearch)
+      PYTHONUNBUFFERED: '1'
+      TOKENIZERS_PARALLELISM: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install CPU embedding runtime
+        run: |
+          # torchvision must come from the same index as torch: open_clip
+          # imports it, and a PyPI (CUDA) build against a cpu-index torch
+          # fails with "operator torchvision::nms does not exist".
+          pip install -q torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          # fastembed is not optional: sparse.py builds the BM25 half of
+          # hybrid retrieval client-side, because a self-hosted Qdrant has no
+          # inference service to do it.
+          pip install -q open_clip_torch==3.3.0 httpx Pillow numpy \
+            sentencepiece protobuf transformers huggingface_hub \
+            qdrant-client fastembed
+      - name: Crawl, embed, score and index
+        env:
+          TARGET: ${{ inputs.target_per_worker }}
+          BUILD: ${{ inputs.build }}
+          MAX_SECONDS: ${{ inputs.max_seconds }}
+          WORKER: ${{ matrix.worker }}
+        run: |
+          python cloud_corpus.py --no-archive \
+            --worker "$WORKER" --workers 20 \
+            --target "$TARGET" --build "$BUILD" \
+            --threads 2 --max-seconds "$MAX_SECONDS"

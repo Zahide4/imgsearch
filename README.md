@@ -93,18 +93,50 @@ These do not raise. They quietly degrade search quality, which is worse.
 
 Everything else in the prototype scales. This does not:
 
-**Generate and store your own thumbnails.** The prototype serves images by
-asking a free shared proxy to resize originals on demand, and that single
-decision produced every serving problem encountered — broken images, slow
-loads, copy failures, and finally an outright IP block when we tried to
-pre-warm the cache. At 10M it is not a shortcut with rough edges; it is a
-dependency that rate-limits you, fingerprints your tooling, and cannot be
-warmed.
+**Stop putting a third-party resizer in front of the images.** The prototype
+serves thumbnails by asking a free shared proxy (wsrv.nl) to fetch the origin
+and resize it on demand, and that single decision produced every serving
+problem encountered -- broken images, slow loads, copy failures, and finally an
+outright IP block when we tried to pre-warm the cache.
 
-Resize once during ingest to a 384px WebP and PUT it to your own bucket. At the
-22 KB average measured across this corpus that is **$1.32/month at 10M** and
-$13/month at 100M. The thumbnails were never the expensive part — the vector
-store is.
+The fix is NOT to store your own copy. Every row already carries
+`thumb_origin`: a 384px thumbnail that Wikimedia's own API generated during the
+crawl (`iiurlwidth=384`) and serves from their own CDN. `cloud_corpus.py`
+requires it -- a row without one is dropped -- so it is always present. Serving
+it directly costs nothing, stores nothing, and replaces a donated proxy with
+the source's own infrastructure.
+
+Building a private bucket to hold a second copy would cost 229 GB, an egress
+allowance, a payment method, and a daily transaction cap, in order to duplicate
+a CDN that is already better than the one we would build. The bucket path is
+still implemented (`--no-embed` plus `embed_manifest.py`) and is the right
+answer if the corpus ever includes sources that do not serve their own
+thumbnails. For Commons it is pure cost.
+
+## The build, in numbers
+
+The 10M build embeds on the crawl runners and parks nothing, so it needs no
+object storage and no payment method. Measured on a GitHub runner (4 vCPU,
+AMD EPYC 7763):
+
+| | per runner |
+|---|---|
+| crawl only | 5.4 img/s |
+| SigLIP forward, 2 threads | 4.8 img/s |
+| SigLIP forward, 4 threads | 4.2 img/s |
+| coupled, overlapped | 4.6 img/s |
+| coupled, no overlap | 2.5 img/s |
+
+**10M on 20 free runners: 30 h overlapped, 56 h worst case**, across roughly
+six re-runs of `corpus-10m.yml` (each job stops at the 6-hour runner ceiling
+and resumes from its Qdrant checkpoint).
+
+Running cost is the Hetzner box holding Qdrant and the API. Thumbnails,
+storage, egress and the embedding pass are all $0.
+
+The trade this makes: changing embedding model means crawling again rather
+than re-reading a bucket. At 30 h of free runner time that is an acceptable
+price for deleting the entire storage layer.
 
 ## The plan, in numbers
 

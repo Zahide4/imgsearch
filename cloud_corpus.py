@@ -19,6 +19,8 @@ import unicodedata
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 
+import checkpoint
+import safety
 import sparse
 import storage
 from pathlib import Path
@@ -175,6 +177,8 @@ def upload_batch(chunk):
 
     def one(entry):
         row, _, webp = entry
+        if not webp:
+            return ''
         try:
             return storage.put(row['image_id'], webp)
         except Exception as exc:
@@ -225,7 +229,7 @@ class HostLimiter:
         return self._sems[host]
 
 
-async def fetch_image(client, row, limiter):
+async def fetch_image(client, row, limiter, encode_webp=True):
     url = row['thumb_origin']
     content = None
     for attempt in range(5):
@@ -264,14 +268,20 @@ async def fetch_image(client, row, limiter):
         with Image.open(io.BytesIO(content)) as source:
             image = ImageOps.exif_transpose(source).convert('RGBA' if 'A' in source.getbands() else 'RGB')
             image.thumbnail((384, 384), Image.Resampling.LANCZOS)
-            buf = io.BytesIO()
-            image.save(buf, 'WEBP', quality=80, method=4)
+            # Encoding costs real CPU on a 4-vCPU runner and the standalone
+            # build stores no derivative at all -- the browser is served
+            # Wikimedia's own thumbnail. Skip it when nothing will keep it.
+            webp = b''
+            if encode_webp:
+                buf = io.BytesIO()
+                image.save(buf, 'WEBP', quality=80, method=4)
+                webp = buf.getvalue()
             if image.mode == 'RGBA':
                 rgb = Image.new('RGB', image.size, 'white')
                 rgb.paste(image, mask=image.getchannel('A'))
             else:
                 rgb = image.convert('RGB')
-            return row, rgb, buf.getvalue()
+            return row, rgb, webp
     except BUG_TYPES:
         # A mistake inside this function would otherwise present as every
         # image being corrupt -- the failure mode that once made discovery
@@ -370,24 +380,31 @@ async def run(args):
     # checkpoint lives in the bucket too, so this phase needs no HuggingFace
     # token, no Qdrant credentials, and nothing that can rate-limit a commit.
     hf = repo = None
-    if not args.no_embed:
+    if not args.no_embed and not args.no_archive:
         hf = HfApi(token=os.environ['HF_TOKEN'])
         repo = os.environ['HF_REPO']
+    if args.no_archive:
+        checkpoint.ensure()
     # No cloud_inference: sparse vectors are built here, so this same code
     # works against a self-hosted instance, which has no inference service.
     qc = None
     if not args.no_embed:
-        qc = QdrantClient(url=os.environ['QDRANT_URL'], api_key=os.environ['QDRANT_API_KEY'],
-                          timeout=120)
+        # .get, not [..]: the 10M build targets a self-hosted Qdrant, which
+        # may have no API key at all. checkpoint.py and embed_manifest.py
+        # already treat it as optional; this was the one place that did not.
+        qc = QdrantClient(url=os.environ['QDRANT_URL'],
+                          api_key=os.environ.get('QDRANT_API_KEY'), timeout=120)
         for field, schema in [('build_id', models.PayloadSchemaType.KEYWORD), ('worker', models.PayloadSchemaType.INTEGER)]:
             qc.create_payload_index(COLLECTION, field, field_schema=schema, wait=True)
-    checkpoint = f'checkpoints/{args.build}-{args.workers}-{args.worker}.json'
+    checkpoint_key = f'checkpoints/{args.build}-{args.workers}-{args.worker}.json'
 
     def read_checkpoint():
+        if args.no_archive:
+            return checkpoint.load(checkpoint_key)
         if args.no_embed:
             from botocore.exceptions import ClientError
             try:
-                body = storage.client().get_object(Bucket=storage.BUCKET, Key=checkpoint)
+                body = storage.client().get_object(Bucket=storage.BUCKET, Key=checkpoint_key)
                 return json.loads(body['Body'].read())
             except ClientError as exc:
                 # Absent means a fresh build; anything else must NOT be read as
@@ -410,7 +427,7 @@ async def run(args):
                                            Prefix=f'manifest/{args.build}/'):
                     if page.get('Contents'):
                         raise RuntimeError(
-                            f'Cannot read checkpoint {checkpoint} ({code}) and '
+                            f'Cannot read checkpoint {checkpoint_key} ({code}) and '
                             f'build {args.build!r} already has manifests. '
                             f'Refusing to start: resuming blind would reuse '
                             f'manifest_seq and overwrite existing shards.') from exc
@@ -418,7 +435,7 @@ async def run(args):
                 return None
         try:
             return json.loads(Path(hf_hub_download(
-                repo, checkpoint, repo_type='dataset',
+                repo, checkpoint_key, repo_type='dataset',
                 token=os.environ['HF_TOKEN'])).read_text())
         except EntryNotFoundError:
             return None
@@ -448,10 +465,14 @@ async def run(args):
             raise SystemExit('--no-embed needs a bucket: set STORAGE_BACKEND=s3 and the S3_* vars')
         print(f'crawl only, worker {args.worker}, {done}/{args.target} already written', flush=True)
         model = preprocess = None
+        scorer = None
     else:
         print(f'loading SigLIP, worker {args.worker}, {done}/{args.target} already uploaded', flush=True)
         model, _, preprocess = open_clip.create_model_and_transforms('ViT-B-16-SigLIP', pretrained='webli')
         model.eval()
+        # The text tower is already loaded, so the safety prompts cost one
+        # forward pass at startup and a small matmul per batch thereafter.
+        scorer = safety.Scorer(model, open_clip.get_tokenizer('ViT-B-16-SigLIP'))
     root = Path('worker-data')
     root.mkdir(exist_ok=True)
     archive = Archive(root, hf, repo)
@@ -498,20 +519,26 @@ async def run(args):
                 manifest_rows.clear()
                 manifest_seq += 1
         else:
-            archive_op = archive.build()
-            if archive_op:
-                ops.append(archive_op)
+            # Standalone keeps nothing: no tarball, so no HuggingFace commit
+            # and no 128/hour ceiling to pace against.
+            if not args.no_archive:
+                archive_op = archive.build()
+                if archive_op:
+                    ops.append(archive_op)
             for i in range(0, len(pending_points), 128):
                 qc.upsert(COLLECTION, points=pending_points[i:i + 128], wait=True)
             pending_points.clear()
         staged_ids.clear()
         state = json.dumps({'queue': list(queue), 'uploaded': done, 'done': done,
                             'manifest_seq': manifest_seq, 'pages': pages}).encode()
+        if args.no_archive:
+            checkpoint.save(checkpoint_key, json.loads(state))
+            return
         if args.no_embed:
-            storage.client().put_object(Bucket=storage.BUCKET, Key=checkpoint,
+            storage.client().put_object(Bucket=storage.BUCKET, Key=checkpoint_key,
                                         Body=state, ContentType='application/json')
             return
-        ops.append(CommitOperationAdd(path_in_repo=checkpoint, path_or_fileobj=state))
+        ops.append(CommitOperationAdd(path_in_repo=checkpoint_key, path_or_fileobj=state))
 
         # A commit rate limit should pause a worker, not kill it. HF answers
         # 429 with "retry in about an hour", so back off long and hard rather
@@ -561,7 +588,8 @@ async def run(args):
                         COLLECTION, ids=[point_id(r['image_id']) for r in rows],
                         with_payload=False, with_vectors=False)}
                 rows = [r for r in rows if point_id(r['image_id']) not in seen | staged_ids][:args.target - done]
-            loaded = [x for x in await asyncio.gather(*(fetch_image(client, row, limiter) for row in rows)) if x]
+            loaded = [x for x in await asyncio.gather(*(fetch_image(client, row, limiter, encode_webp=not args.no_archive)
+                                     for row in rows)) if x]
             failed += len(rows) - len(loaded)
             produced = 0
             if args.no_embed:
@@ -603,18 +631,26 @@ async def run(args):
                 # museum loads, copy failures, and finally an IP block when we
                 # tried to warm it. It is the one architectural change in the
                 # 10M plan, and it costs $1.21/month at the 21.2 KB measured.
-                for row, url in zip((r for r, _, _ in chunk), upload_batch(chunk)):
-                    if url:
-                        row['cdn'] = url
+                if not args.no_archive:
+                    for row, url in zip((r for r, _, _ in chunk), upload_batch(chunk)):
+                        if url:
+                            row['cdn'] = url
                 # One pass over the tokenizer for the batch, not one per row.
                 sparse_vectors = sparse.documents(search_text(row) for row, _, _ in chunk)
-                for (row, _, webp), vec, bm25 in zip(chunk, vectors, sparse_vectors):
+                # The image vector is already here, so scoring it against the
+                # cached safety prompts is one small matmul. Deferring it would
+                # mean a second pass over a corpus this build does not keep.
+                marks = scorer.payload(vectors) if scorer else [{}] * len(chunk)
+                for (row, _, webp), vec, bm25, mark in zip(
+                        chunk, vectors, sparse_vectors, marks):
+                    row.update(mark)
                     points.append(models.PointStruct(
                         id=point_id(row['image_id']),
                         vector={'image': vec.tolist(), 'bm25': bm25},
                         payload=row,
                     ))
-                    archive.add(row, webp)
+                    if not args.no_archive:
+                        archive.add(row, webp)
                 pending_points.extend(points)
                 staged_ids.update(p.id for p in points)
                 done += len(points)
@@ -670,8 +706,20 @@ if __name__ == '__main__':
     p.add_argument('--target', type=int, required=True)
     p.add_argument('--build', default='commons-v1')
     p.add_argument('--batch', type=int, default=16)
-    p.add_argument('--threads', type=int, default=4)
+    # Measured on a GitHub runner (4 vCPU, AMD EPYC 7763): 2 threads
+    # gave 4.8 img/s through SigLIP and 4 gave 4.2. More threads than
+    # the forward pass can use just adds contention.
+    p.add_argument('--threads', type=int, default=2)
     p.add_argument('--max-seconds', type=int, default=16200)
+    p.add_argument('--no-archive', action='store_true',
+                   help='embed on this runner and keep nothing: no bucket, no '
+                        'HuggingFace, no derivative stored anywhere. The browser '
+                        'is served Wikimedia\'s own thumbnail URL, which every '
+                        'row already carries. Checkpoints go to Qdrant. This is '
+                        'the 10M build: it needs no object storage, so it needs '
+                        'no payment method. The cost is that changing embedding '
+                        'model means crawling again rather than re-reading a '
+                        'bucket.')
     p.add_argument('--no-embed', action='store_true',
                    help='crawl only: derivatives to the bucket, metadata to a '
                         'manifest, no SigLIP and no Qdrant. Embedding then runs '
@@ -679,4 +727,11 @@ if __name__ == '__main__':
     args = p.parse_args()
     if args.workers < 1 or not 0 <= args.worker < args.workers or args.target < 1:
         p.error('invalid worker/target configuration')
+    if args.no_embed and args.no_archive:
+        # --no-embed writes derivatives for a later GPU pass to read;
+        # --no-archive keeps no derivative at all. Together they would crawl
+        # the internet and throw every image away.
+        p.error('--no-embed and --no-archive are contradictory: the first '
+                'stores images for a GPU pass to read later, the second '
+                'stores nothing')
     asyncio.run(run(args))
