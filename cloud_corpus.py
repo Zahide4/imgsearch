@@ -307,7 +307,14 @@ class Relevance:
 
 
 def embed_chunk(model, preprocess, chunk):
-    """Preprocess and run the image tower. Runs in a thread; no async here."""
+    """Preprocess and run the image tower. Runs in a thread; no async here.
+
+    torch is imported here rather than at module scope because the rest of this
+    file does the same: the crawl-only and no-embed paths never load it, and on
+    those runs importing it costs seconds and hundreds of megabytes for nothing.
+    """
+    import torch
+    import torch.nn.functional as F
     batch = torch.stack([preprocess(im) for _, im, _ in chunk])
     with torch.inference_mode():
         return F.normalize(model.encode_image(batch), dim=-1).float().numpy()

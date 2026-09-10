@@ -483,6 +483,23 @@ class SearchHarvestTest(unittest.TestCase):
         self.assertEqual(params['iiurlwidth'], 384)
 
 
+    def test_embed_chunk_runs_standalone(self):
+        """It runs in a worker thread, so it must not lean on names the caller
+        happened to import. A NameError here reached a runner once: torch is
+        imported inside main(), embed_chunk is module scope, and every other
+        test stubbed it out, so nothing ever executed the real one."""
+        import torch as _torch
+
+        class FakeModel:
+            def encode_image(self, batch):
+                return _torch.ones(batch.shape[0], 768)
+
+        chunk = [({'image_id': f'x{i}'}, _torch.zeros(3, 224, 224), b'')
+                 for i in range(4)]
+        out = cloud_corpus.embed_chunk(FakeModel(), lambda im: im, chunk)
+        self.assertEqual(out.shape, (4, 768))
+        self.assertAlmostEqual(float((out[0] ** 2).sum()), 1.0, places=4)
+
     def test_bin_packing_beats_striding_on_makespan(self):
         # Striding ignores shard size. On the Quality/Featured/Valued run that
         # left 9 of 40 lanes with zero rows while the busiest took 24,906
