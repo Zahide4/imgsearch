@@ -1,0 +1,263 @@
+<title>Building a Curated 10M</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  :root {
+    --ground:#F6F7F9; --panel:#FFFFFF; --line:#DDE1E7; --line-soft:#EAEDF1;
+    --ink:#12151C; --body:#3C4350; --muted:#6B7280; --accent:#0F7B6C; --accent-soft:#DCEFEB;
+    --warn:#A8461B; --warn-soft:#F7E7DE;
+    --display:'Fraunces',Georgia,serif;
+    --mono:'IBM Plex Mono',ui-monospace,Menlo,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+  }
+  :root:not([data-theme="light"]) { }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:#0F1115; --panel:#161A20; --line:#282E38; --line-soft:#1F242C;
+      --ink:#EDF0F4; --body:#C2C8D2; --muted:#8B94A3; --accent:#4FD1BC; --accent-soft:#12312C;
+      --warn:#E9945F; --warn-soft:#33210F;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground:#0F1115; --panel:#161A20; --line:#282E38; --line-soft:#1F242C;
+    --ink:#EDF0F4; --body:#C2C8D2; --muted:#8B94A3; --accent:#4FD1BC; --accent-soft:#12312C;
+    --warn:#E9945F; --warn-soft:#33210F;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--ground); color:var(--body); font-family:var(--sans);
+          line-height:1.6; -webkit-font-smoothing:antialiased; }
+  .wrap { max-width:1000px; margin:0 auto; padding:58px 22px 110px; }
+  .eyebrow { font-family:var(--mono); font-size:11.5px; letter-spacing:.12em; text-transform:uppercase;
+              color:var(--accent); margin:0 0 12px; }
+  h1 { font-family:var(--display); font-weight:600; font-size:clamp(30px,4.6vw,46px); line-height:1.1;
+        letter-spacing:-.015em; color:var(--ink); margin:0 0 14px; text-wrap:balance; }
+  .lede { font-size:17px; max-width:66ch; margin:0; color:var(--body); }
+  h2 { font-family:var(--display); font-weight:600; font-size:25px; color:var(--ink);
+        margin:62px 0 8px; letter-spacing:-.01em; }
+  h3 { font-size:14px; font-weight:600; color:var(--ink); margin:26px 0 9px; }
+  p { max-width:68ch; }
+  .sub { color:var(--muted); font-size:14.5px; margin:0 0 20px; max-width:68ch; }
+  .chip { display:inline-block; font-family:var(--mono); font-size:11.5px; padding:3px 9px;
+           border:1px solid var(--line); border-radius:20px; margin:0 5px 6px 0; color:var(--body);
+           background:var(--panel); }
+  table { width:100%; border-collapse:collapse; margin:8px 0 0; }
+  th { font-family:var(--mono); font-size:10.5px; letter-spacing:.09em; text-transform:uppercase;
+        color:var(--muted); text-align:left; font-weight:500; padding:0 12px 9px 0;
+        border-bottom:1px solid var(--line); }
+  td { padding:15px 12px 15px 0; border-bottom:1px solid var(--line-soft); vertical-align:top;
+        font-size:14px; }
+  .name { font-weight:600; color:var(--ink); width:20%; }
+  .roots { display:block; font-family:var(--mono); font-size:10.5px; color:var(--muted);
+            font-weight:400; margin-top:3px; }
+  .num { font-family:var(--mono); font-variant-numeric:tabular-nums; color:var(--ink);
+          white-space:nowrap; width:11%; }
+  .bar { width:16%; position:relative; }
+  .bar i { display:block; height:7px; background:var(--accent); border-radius:4px; }
+  .bar em { font-family:var(--mono); font-size:10.5px; font-style:normal; color:var(--muted);
+             display:block; margin-top:5px; }
+  .why { color:var(--body); font-size:13px; line-height:1.5; }
+  .why b { color:var(--ink); font-weight:600; }
+  tr.weak .bar i { background:var(--warn); }
+  tr.weak .name { color:var(--warn); }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:9px;
+            padding:24px 26px; margin-top:22px; }
+  .panel h3 { margin-top:0; }
+  .steps { counter-reset:s; list-style:none; padding:0; margin:20px 0 0; }
+  .steps li { counter-increment:s; position:relative; padding:0 0 26px 46px; }
+  .steps li::before { content:counter(s); position:absolute; left:0; top:-1px; width:29px; height:29px;
+      border-radius:50%; background:var(--accent-soft); color:var(--accent); font-family:var(--mono);
+      font-size:12.5px; display:grid; place-items:center; font-weight:500; }
+  .steps h3 { margin:2px 0 5px; font-size:15.5px; }
+  .steps p { margin:0; font-size:14px; }
+  .cost { font-family:var(--mono); font-size:11.5px; color:var(--accent); margin-top:6px;
+           display:inline-block; }
+  .callout { border-left:3px solid var(--warn); background:var(--warn-soft); padding:16px 20px;
+              border-radius:0 7px 7px 0; margin:22px 0; }
+  .callout p { margin:0; font-size:14px; color:var(--ink); }
+  .mono { font-family:var(--mono); font-size:12.5px; color:var(--ink); }
+  .scroll { overflow-x:auto; }
+</style>
+<div class="wrap">
+  <p class="eyebrow">corpus plan</p>
+  <h1>Building a Curated 10M</h1>
+  <p class="lede">Walking all of Wikimedia Commons returns scanned book pages, herbarium sheets and
+    boundary maps — real photographs of real things, useless for a mood board. This is the
+    replacement: what people actually search for, what Commons actually holds, and how to get ten
+    million images that are worth having.</p>
+
+  <h2>What people actually search</h2>
+  <p class="sub">Taken from the published popular-search lists on Pexels, Pixabay and Unsplash
+    rather than invented. Two of these groups changed the allocation.</p>
+  <h3>Nature dominates every list</h3><div><span class="chip">nature</span><span class="chip">landscape</span><span class="chip">forest</span><span class="chip">sunset</span><span class="chip">mountains</span><span class="chip">beach</span><span class="chip">sky</span><span class="chip">ocean</span><span class="chip">scenery</span><span class="chip">water</span><span class="chip">misty landscape</span></div><h3>Wallpapers and backgrounds — the surprise</h3><div><span class="chip">4k wallpaper</span><span class="chip">phone wallpaper</span><span class="chip">iphone wallpaper</span><span class="chip">desktop wallpaper</span><span class="chip">zoom background</span><span class="chip">green background</span><span class="chip">marble background</span><span class="chip">wood texture</span><span class="chip">abstract pattern background</span></div><h3>Animals</h3><div><span class="chip">cat</span><span class="chip">dog</span><span class="chip">bird</span><span class="chip">butterfly</span><span class="chip">horse</span><span class="chip">elephant</span><span class="chip">lion</span><span class="chip">wolf</span><span class="chip">fish</span><span class="chip">baby animal</span><span class="chip">peacock feather</span></div><h3>Religion and culture — heavily searched, poorly served</h3><div><span class="chip">krishna</span><span class="chip">shiva</span><span class="chip">ganesh</span><span class="chip">diwali</span><span class="chip">durga</span><span class="chip">islamic</span><span class="chip">kaaba</span><span class="chip">madina</span><span class="chip">masjid nabawi</span><span class="chip">jesus</span><span class="chip">christmas</span></div><h3>Places, by name</h3><div><span class="chip">paris</span><span class="chip">new york</span><span class="chip">hamburg</span><span class="chip">glasgow</span><span class="chip">varanasi</span><span class="chip">rio de janeiro</span><span class="chip">singapore</span><span class="chip">valencia</span><span class="chip">sa pa</span></div><h3>People and work</h3><div><span class="chip">people</span><span class="chip">couple</span><span class="chip">family</span><span class="chip">baby</span><span class="chip">portraits</span><span class="chip">office</span><span class="chip">doctor</span><span class="chip">healthcare</span><span class="chip">gym</span><span class="chip">discussion</span></div><h3>Mood and aesthetic</h3><div><span class="chip">dark aesthetic</span><span class="chip">minimalist</span><span class="chip">vintage car</span><span class="chip">autumn aesthetic</span><span class="chip">black and white</span><span class="chip">candid</span><span class="chip">film grain</span></div>
+
+  <h2>What Commons actually holds</h2>
+  <p class="sub">Category sizes come from the Commons API. The depth probe below is the finding that
+    matters most, and it is easy to get wrong.</p>
+  <div class="panel">
+    <h3>Files reachable by recursion depth</h3>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>category root</th><th>depth 1</th><th>depth 2</th><th>depth 3</th></tr></thead>
+        <tbody><tr><td class="mono">Category:Birds</td><td class="num">2</td><td class="num">251</td><td class="num">158,325</td></tr><tr><td class="mono">Category:Food</td><td class="num">75</td><td class="num">3,437</td><td class="num">28,989</td></tr><tr><td class="mono">Category:Landscapes</td><td class="num">850</td><td class="num">3,911</td><td class="num">13,907</td></tr></tbody>
+      </table>
+    </div>
+    <p class="sub" style="margin:16px 0 0">
+      <code class="mono">Category:Birds</code> holds <b>two</b> files directly and
+      <b>158,325</b> by depth three — and that probe capped its own fan-out, so the true figure is
+      higher. <code class="mono">Category:Animals</code> holds exactly one file.
+      Read flat, a category crawl returns nothing. Every root in the plan below is walked
+      recursively.</p>
+  </div>
+  <div class="callout">
+    <p><b>One exception, and it is a gift.</b> <code class="mono">Category:Quality images</code>
+      holds <b>462,631</b> files in a single flat category, each reviewed by a Commons contributor
+      for photographic quality. It is the highest signal per request available anywhere in this plan,
+      and it is one crawl.</p>
+  </div>
+
+  <h2>The allocation</h2>
+  <p class="sub">Demand multiplied by supply — 10,962,000 allocated against a 10,000,000 target, because
+    two buckets will not fill. Those two are marked.</p>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>bucket</th><th>target</th><th>share</th><th>reasoning</th></tr></thead>
+      <tbody>
+    <tr class="">
+      <td class="name">Nature and landscape<span class="roots">19 category roots</span></td>
+      <td class="num">2,400,000</td>
+      <td class="bar"><i style="width:100.0%"></i><em>21.9%</em></td>
+      <td class="why"><b>Demand.</b> #1 on every published list: nature, landscape, forest, sunset, mountains, beach, sky, ocean, scenery, water<br><b>Supply.</b> deep and excellent</td>
+    </tr>
+    <tr class="">
+      <td class="name">Animals and wildlife<span class="roots">12 category roots</span></td>
+      <td class="num">1,600,000</td>
+      <td class="bar"><i style="width:66.7%"></i><em>14.6%</em></td>
+      <td class="why"><b>Demand.</b> cat, dog, bird, butterfly, horse, elephant, lion, fish, wolf, cow, baby animal<br><b>Supply.</b> the deepest tree on Commons</td>
+    </tr>
+    <tr class="">
+      <td class="name">Architecture and places<span class="roots">15 category roots</span></td>
+      <td class="num">1,600,000</td>
+      <td class="bar"><i style="width:66.7%"></i><em>14.6%</em></td>
+      <td class="why"><b>Demand.</b> cities, streets, buildings, bridges, interiors, plus heavy city-name searching (paris, new york, hamburg, glasgow, varanasi)<br><b>Supply.</b> Commons is overwhelmingly geographic; excellent</td>
+    </tr>
+    <tr class="">
+      <td class="name">Plants and flowers<span class="roots">8 category roots</span></td>
+      <td class="num">800,000</td>
+      <td class="bar"><i style="width:33.3%"></i><em>7.3%</em></td>
+      <td class="why"><b>Demand.</b> flowers, rose, trees, garden<br><b>Supply.</b> very deep</td>
+    </tr>
+    <tr class="">
+      <td class="name">Art and illustration<span class="roots">10 category roots</span></td>
+      <td class="num">700,000</td>
+      <td class="bar"><i style="width:29.2%"></i><em>6.4%</em></td>
+      <td class="why"><b>Demand.</b> art, paintings, drawings, vintage, clipart, aesthetic<br><b>Supply.</b> Commons is a museum archive; outstanding here</td>
+    </tr>
+    <tr class="">
+      <td class="name">Transport and vehicles<span class="roots">9 category roots</span></td>
+      <td class="num">600,000</td>
+      <td class="bar"><i style="width:25.0%"></i><em>5.5%</em></td>
+      <td class="why"><b>Demand.</b> car, airplane, train, ship, super car, bmw<br><b>Supply.</b> very strong</td>
+    </tr>
+    <tr class="">
+      <td class="name">Food and drink<span class="roots">8 category roots</span></td>
+      <td class="num">600,000</td>
+      <td class="bar"><i style="width:25.0%"></i><em>5.5%</em></td>
+      <td class="why"><b>Demand.</b> food, coffee, bakery, biryani, cooking<br><b>Supply.</b> moderate, grows fast with depth</td>
+    </tr>
+    <tr class="">
+      <td class="name">Culture, religion and festivals<span class="roots">12 category roots</span></td>
+      <td class="num">550,000</td>
+      <td class="bar"><i style="width:22.9%"></i><em>5.0%</em></td>
+      <td class="why"><b>Demand.</b> very high and under-served elsewhere: krishna, shiva, ganesh, diwali, durga, islamic, mosque, kaaba, madina, christmas, jesus<br><b>Supply.</b> strong: temples, mosques, festivals, religious art</td>
+    </tr>
+    <tr class="weak">
+      <td class="name">People and daily life<span class="roots">9 category roots</span></td>
+      <td class="num">500,000</td>
+      <td class="bar"><i style="width:20.8%"></i><em>4.6%</em></td>
+      <td class="why"><b>Demand.</b> people, couple, family, baby, portraits, office, doctor, gym<br><b>Supply.</b> WEAK. This is stock photography&#x27;s home turf and Commons&#x27; blind spot. Allocation is deliberately below demand because the images are not there to take.</td>
+    </tr>
+    <tr class="">
+      <td class="name">Quality images (flat, vetted)<span class="roots">3 category roots</span></td>
+      <td class="num">462,000</td>
+      <td class="bar"><i style="width:19.2%"></i><em>4.2%</em></td>
+      <td class="why"><b>Demand.</b> not a topic; a quality floor<br><b>Supply.</b> 462,631 files in ONE flat category, reviewed by Commons contributors for photographic quality. Highest signal-per-crawl available.</td>
+    </tr>
+    <tr class="">
+      <td class="name">Science, space and technology<span class="roots">9 category roots</span></td>
+      <td class="num">400,000</td>
+      <td class="bar"><i style="width:16.7%"></i><em>3.6%</em></td>
+      <td class="why"><b>Demand.</b> space, universe, earth, brain, computer, ai<br><b>Supply.</b> strong; Commons carries NASA and ESA public-domain imagery</td>
+    </tr>
+    <tr class="">
+      <td class="name">Historical and archival<span class="roots">6 category roots</span></td>
+      <td class="num">400,000</td>
+      <td class="bar"><i style="width:16.7%"></i><em>3.6%</em></td>
+      <td class="why"><b>Demand.</b> vintage, black and white, retro, historical, old<br><b>Supply.</b> excellent and genuinely differentiating; nobody else has this</td>
+    </tr>
+    <tr class="weak">
+      <td class="name">Textures, patterns and backgrounds<span class="roots">9 category roots</span></td>
+      <td class="num">350,000</td>
+      <td class="bar"><i style="width:14.6%"></i><em>3.2%</em></td>
+      <td class="why"><b>Demand.</b> ENORMOUS. Pixabay&#x27;s list is dominated by wallpaper/background variants: 4k wallpaper, phone wallpaper, zoom background, marble background, wood texture<br><b>Supply.</b> WEAK on Commons, which does not shoot for this use. Under-allocated for the same reason as People.</td>
+    </tr></tbody>
+    </table>
+  </div>
+  <div class="callout">
+    <p><b>Two buckets are deliberately allocated below their demand.</b> People-and-daily-life and
+      textures-and-backgrounds are the most-searched things on the whole list, and they are exactly
+      what stock photography exists to sell and what Commons does not shoot. Allocating to demand
+      would book volume that is not there to take. This is where the product will be weakest, and no
+      plan fixes it — only a different source would.</p>
+  </div>
+
+  <h2>The plan</h2>
+  <ol class="steps">
+    <li>
+      <h3>Test the quality gate on images we already have</h3>
+      <p>Score the 24,000 enumerated images against the keep/drop prompts using the same matmul as
+        the safety filter. This measures the keep rate and calibrates the threshold before anything
+        is built on it. If enumeration filters to something decent, it stays useful as a fallback for
+        categories that run dry.</p>
+      <span class="cost">30 minutes · no new code</span>
+    </li>
+    <li>
+      <h3>Build recursive category traversal</h3>
+      <p>Add a discovery mode that walks a category tree instead of the alphabet:
+        <code class="mono">generator=categorymembers</code> with a visited set, a depth limit and a
+        frontier that survives in the checkpoint. Everything downstream — fetching, embedding,
+        safety, indexing — is untouched.</p>
+      <span class="cost">half a day · the only real code</span>
+    </li>
+    <li>
+      <h3>Wire the quality gate into the crawl</h3>
+      <p>One more prompt group in the scorer already running per batch. Images that fail the gate are
+        never indexed, so the corpus stays clean without a second pass over it later.</p>
+      <span class="cost">1 hour</span>
+    </li>
+    <li>
+      <h3>Crawl Quality images first</h3>
+      <p>462,631 vetted files, flat, no recursion needed. It doubles as a live test of the new
+        pipeline against content we know is good — if these come out wrong, the bug is ours.</p>
+      <span class="cost">about 1 hour of crawling</span>
+    </li>
+    <li>
+      <h3>Pilot one bucket and look at it</h3>
+      <p>Run nature-and-landscape to roughly 50,000 images, then review a random draw the same way
+        the enumerated corpus was reviewed. Judgement by eye, not by metric. Adjust roots and the
+        gate threshold before committing to the rest.</p>
+      <span class="cost">1 hour, and the most important hour here</span>
+    </li>
+    <li>
+      <h3>Run the full build</h3>
+      <p>Forty workers, buckets in allocation order so the corpus is useful at every point rather
+        than only at the end. Roughly eight to ten runs of the workflow.</p>
+      <span class="cost">1–2 days unattended · $0</span>
+    </li>
+  </ol>
+
+  <div class="panel" style="margin-top:34px">
+    <h3>What this costs</h3>
+    <p style="margin:0">Nothing but time. The crawl runs on free GitHub runners, the images are served
+      from Wikimedia's own CDN, and the index lives on the €7 box already running. The work is about
+      a day of building, then one to two days of unattended crawling.</p>
+  </div>
+</div>
