@@ -996,6 +996,19 @@ async def run(args):
             # life -- because the shard had already been crawled. They arrive in
             # runs, since both sortkey and relevance order cluster, so a run of
             # them means the shard is spent rather than momentarily thin.
+            # Depth cap. Search hands results back best-first, so taking the
+            # top N of a shard IS a quality filter -- and unlike the relevance
+            # gate it costs nothing, because the tail is never fetched rather
+            # than fetched, embedded and then discarded. `coffee` and `sunset`
+            # both hold up for the first few hundred; only `coffee` collapses
+            # after that, and this stops both before it matters.
+            job['kept'] = job.get('kept', 0) + produced
+            if args.shard_depth and job['kept'] >= args.shard_depth:
+                print(f'worker {args.worker}: {job.get("topic", job.get("cat"))!r} '
+                      f'hit its {args.shard_depth}-row cap', flush=True)
+                queue.popleft()
+                save()
+                continue
             job['barren'] = 0 if produced else job.get('barren', 0) + 1
             if job['barren'] >= args.barren_patience:
                 print(f'worker {args.worker}: nothing new in {job["barren"]} pages, '
@@ -1080,7 +1093,7 @@ if __name__ == '__main__':
                         '--topics harvest across. Defaults to the commercially '
                         'clean set, which keeps share-alike out of a corpus the '
                         'app hides by default.')
-    p.add_argument('--relevance', type=float, default=0.10,
+    p.add_argument('--relevance', type=float, default=0.0,
                    help='per-image floor, as a fraction of the running best '
                         'batch median for that shard. 0 disables the gate '
                         'entirely. Low on purpose: its job is dropping what is '
@@ -1089,7 +1102,7 @@ if __name__ == '__main__':
                         '"clearly relevant" varies by an order of magnitude '
                         'between prompts -- .0111 for sunset against .2446 for '
                         'autumn forest, measured.')
-    p.add_argument('--relevance-stop', type=float, default=0.30,
+    p.add_argument('--relevance-stop', type=float, default=0.0,
                    help='a shard is decaying when its batch median falls below '
                         'this fraction of its running best. This is the number '
                         'that decides how deep a topic is crawled; measured, '
@@ -1106,6 +1119,13 @@ if __name__ == '__main__':
                         'generator=categorymembers crawl (the Quality/Featured/'
                         'Valued layer). Empty means the default filename-range '
                         'allimages walk. Sharded by sortkey prefix across workers.')
+    p.add_argument('--shard-depth', type=int, default=800,
+                   help='stop a (topic, licence, width) shard after this many '
+                        'indexed rows. Replaces the relevance gate as the depth '
+                        'control: search is relevance-ordered, so a cap keeps '
+                        'the good part of every topic without paying to fetch '
+                        'and embed the tail. 800 x 20,848 shards is ~9M '
+                        'addressable; 0 disables the cap.')
     p.add_argument('--barren-patience', type=int, default=25,
                    help='consecutive pages indexing nothing before a shard is '
                         'abandoned. Zero-yield pages are cheap (0.93s measured) '
