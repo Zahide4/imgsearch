@@ -451,6 +451,30 @@ def metadata(page, end=None):
     }
 
 
+# Commons sometimes answers 200 with an error body instead of an HTTP error,
+# so request()'s 429/5xx retry never sees it. internal_api_error_* means a
+# backend hiccup -- internal_api_error_DBConnectionError killed worker 37 of
+# build 10m-0911 2.5h into its window. Worth a wait and a retry, not a dead
+# worker. Bounded: past COMMONS_MAX_BLIPS straight blips the error stands, so
+# a truly broken query still dies loudly instead of burning its whole window.
+COMMONS_MAX_BLIPS = 10
+
+
+def transient_commons_error(code):
+    """True when a Commons error-JSON code is a backend blip worth retrying."""
+    if not code:
+        return False
+    if code in ('maxlag', 'ratelimited', 'readonly'):
+        return True
+    return code.startswith('internal_api_error')
+
+
+def drop_label(job):
+    """Short shard name for the drop line. Range shards carry start/end (which
+    wins when present); topic shards carry topic/lic/band."""
+    return job.get('start', {k: job.get(k) for k in ('topic', 'lic', 'band')})
+
+
 async def request(client, url, **kwargs):
     for attempt in range(6):
         try:
@@ -913,6 +937,7 @@ async def run(args):
                 time.sleep(wait)
 
     async with httpx.AsyncClient(headers={'User-Agent': UA}, follow_redirects=True) as client:
+        blips = 0  # consecutive transient Commons error-JSONs; reset on any good page
         while (queue and done < args.target and not goal['reached']
                and time.monotonic() - start_time < args.max_seconds):
             job = queue[0]
@@ -932,6 +957,18 @@ async def run(args):
                 if code in ('maxlag', 'ratelimited'):
                     await asyncio.sleep(30)
                     continue
+                if transient_commons_error(code):
+                    # Backend blip, not a bad query: wait it out, but not
+                    # forever -- past the cap the error stands and the worker
+                    # dies loudly instead of burning its window one minute at
+                    # a time.
+                    blips += 1
+                    if blips > COMMONS_MAX_BLIPS:
+                        raise RuntimeError(f"Commons API error: {code}")
+                    print(f'worker {args.worker}: Commons blip {code} '
+                          f'({blips}/{COMMONS_MAX_BLIPS}), sleeping 60s', flush=True)
+                    await asyncio.sleep(60)
+                    continue
                 if code == 'cirrussearch-offset-too-large':
                     # The search API refuses offsets past 10,000. That is the
                     # shard exhausted, not a failure: licence and width shards
@@ -941,20 +978,23 @@ async def run(args):
                     print(f'worker {args.worker}: shard depth reached for '
                           f'{job.get("topic")!r} / {job.get("lic")!r}', flush=True)
                     queue.popleft()
+                    blips = 0  # fresh job, fresh streak
                     save()
                     continue
                 if code == 'urlparamnormal':
                     # One unrepresentable cursor should cost a job, not a
                     # worker. Drop this job, keep whatever it already indexed,
                     # and move to the next one. Job shape differs by mode
-                    # (ranges have start/end, topic shards have topic/licence).
-                    label = job.get('start', {k: job.get(k) for k in ('topic', 'licence', 'band')})
+                    # (ranges have start/end, topic shards have topic/lic/band).
+                    label = drop_label(job)
                     print(f'worker {args.worker}: dropping job '
                           f'{label!r} after {code}', flush=True)
                     queue.popleft()
+                    blips = 0  # fresh job, fresh streak
                     save()
                     continue
                 raise RuntimeError(f"Commons API error: {code}")
+            blips = 0  # a clean page clears the blip streak
             rows = [row for p in data.get('query', {}).get('pages', []) if (row := metadata(p, end))]
             rows = list({row['image_id']: row for row in rows}.values())
             if rows:

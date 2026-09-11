@@ -653,3 +653,40 @@ class GoalStopTest(unittest.TestCase):
     def test_reaching_the_goal_ends_the_build_with_jobs_left(self):
         # Exit 0, not 75: no resume flag, so the build stops instead of restarting.
         self.assertEqual(cloud_corpus.exit_code(10, 1_000_000, [{'topic': 'x'}], goal_reached=True), 0)
+
+
+class CommonsBlipTest(unittest.TestCase):
+    """A Commons backend blip must cost a minute, not a worker: worker 37 of
+    build 10m-0911 died 2.5h in on internal_api_error_DBConnectionError."""
+
+    def test_blip_codes_retry_and_bad_codes_do_not(self):
+        self.assertTrue(cloud_corpus.transient_commons_error('maxlag'))
+        self.assertTrue(cloud_corpus.transient_commons_error('ratelimited'))
+        self.assertTrue(cloud_corpus.transient_commons_error('readonly'))
+        self.assertTrue(cloud_corpus.transient_commons_error(
+            'internal_api_error_DBConnectionError'))
+        self.assertTrue(cloud_corpus.transient_commons_error(
+            'internal_api_error_DBQueryError'))
+        self.assertFalse(cloud_corpus.transient_commons_error(None))
+        self.assertFalse(cloud_corpus.transient_commons_error(''))
+        self.assertFalse(cloud_corpus.transient_commons_error('urlparamnormal'))
+        self.assertFalse(cloud_corpus.transient_commons_error(
+            'cirrussearch-offset-too-large'))
+        self.assertFalse(cloud_corpus.transient_commons_error('badvalue'))
+
+    def test_blip_cap_is_a_small_positive_number(self):
+        self.assertIsInstance(cloud_corpus.COMMONS_MAX_BLIPS, int)
+        self.assertGreaterEqual(cloud_corpus.COMMONS_MAX_BLIPS, 1)
+
+    def test_drop_label_uses_lic_for_topic_shards(self):
+        # Regression: the label read 'licence' while search jobs carry 'lic',
+        # so the drop line printed None instead of the shard.
+        job = {'topic': 'sunset', 'lic': 'CC-Zero', 'band': 'filew:>3000',
+               'continue': {}}
+        self.assertEqual(cloud_corpus.drop_label(job),
+                         {'topic': 'sunset', 'lic': 'CC-Zero',
+                          'band': 'filew:>3000'})
+
+    def test_drop_label_prefers_start_for_range_shards(self):
+        job = {'start': 'A', 'end': 'B', 'continue': {}}
+        self.assertEqual(cloud_corpus.drop_label(job), 'A')
