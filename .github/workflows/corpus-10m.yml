@@ -176,7 +176,14 @@ jobs:
       - name: Crawl, embed, score and index
         id: crawl
         env:
-          TARGET: ${{ inputs.target_per_worker }}
+          # A repo variable overrides the input when set. A running build
+          # restarts itself with its original input, so a variable is the only
+          # way to change a lane's quota mid-build, and the dispatch form is
+          # already at GitHub's 10-input limit.
+          TARGET: ${{ vars.CORPUS_TARGET_OVERRIDE || inputs.target_per_worker }}
+          # 0 is off. When set, every worker stops once the collection holds
+          # this many points, and the build ends there, not at per-lane quotas.
+          STOP_AT_TOTAL: ${{ vars.CORPUS_STOP_AT_TOTAL || '0' }}
           BUILD: ${{ inputs.build }}
           CATEGORIES: ${{ inputs.categories }}
           TOPICS: ${{ inputs.topics }}
@@ -190,7 +197,8 @@ jobs:
             --target "$TARGET" --build "$BUILD" \
             --categories "$CATEGORIES" \
             --topics "$TOPICS" \
-            --threads 2 --max-seconds "$MAX_SECONDS"
+            --threads 2 --max-seconds "$MAX_SECONDS" \
+            --stop-at-total "$STOP_AT_TOTAL"
           code=$?
           set -e
           # 75 (EX_TEMPFAIL) means the worker ran its window, saved its cursor,

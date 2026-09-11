@@ -34,6 +34,7 @@ from huggingface_hub import CommitOperationAdd, HfApi, hf_hub_download
 from huggingface_hub.errors import HfHubHTTPError
 from huggingface_hub.errors import EntryNotFoundError
 from qdrant_client import QdrantClient, models
+from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 
 from ingest import COMMONS, license_ok, _clean
 from push_qdrant import point_id, license_class
@@ -356,7 +357,53 @@ async def batches_as_fetched(client, rows, limiter, size, encode_webp):
                 task.cancel()
 
 
-def exit_code(done, target, queue):
+# Qdrant sits behind a proxy on a busy box, and a connection can drop halfway
+# through a reply ("peer closed connection without sending complete message
+# body"). One such blip killed worker 45 of build 10m-0911 an hour into its
+# window, and a crashed worker raises no resume flag, so it sat idle until the
+# next restart. Every Qdrant call here is safe to repeat: count, retrieve and
+# the checkpoint load only read, the payload index and the state collection are
+# idempotent, and upserts rewrite points under deterministic ids. About two
+# minutes of retrying, then the error stands, as it always did.
+QDRANT_RETRY_DELAYS = (2, 4, 8, 16, 32, 60)
+
+
+def transient_qdrant_error(exc):
+    """A dropped connection, a timeout or a server-side failure: worth another try."""
+    if isinstance(exc, (ResponseHandlingException, httpx.TransportError)):
+        return True
+    if isinstance(exc, UnexpectedResponse):
+        return exc.status_code is not None and (exc.status_code >= 500 or exc.status_code == 429)
+    return False
+
+
+def with_retries(call, what, sleep=time.sleep, delays=QDRANT_RETRY_DELAYS):
+    """Runs `call`, retrying transient Qdrant errors; any other error raises at once."""
+    for attempt, delay in enumerate(delays):
+        try:
+            return call()
+        except Exception as exc:
+            if not transient_qdrant_error(exc):
+                raise
+            print(f'qdrant {what} failed ({type(exc).__name__}: {str(exc)[:120]}); '
+                  f'retry {attempt + 1}/{len(delays)} in {delay}s', flush=True)
+            sleep(delay)
+    return call()
+
+
+def goal_met(size, stop_at):
+    """True once the whole collection holds `stop_at` points. 0 disables it."""
+    return bool(stop_at) and size >= stop_at
+
+
+def collection_size(qc):
+    """Points in the whole collection -- every build's, not just this one's.
+    Approximate, which is fine for a stopping line: each worker overshoots it
+    by at most one flush."""
+    return with_retries(lambda: qc.get_collection(COLLECTION).points_count or 0, 'collection size')
+
+
+def exit_code(done, target, queue, goal_reached=False):
     """75 (EX_TEMPFAIL) only when the worker stopped with jobs still queued.
 
     The workflow restarts a build whenever a worker exits 75, so 75 has to mean
@@ -366,6 +413,9 @@ def exit_code(done, target, queue):
     exited 75 for that too, which would have made a self-restarting build keep
     relaunching finished workers until its restart cap ran out.
     """
+    if goal_reached:
+        # The whole corpus is done, whatever this worker's own share says.
+        return 0
     return 75 if done < target and queue else 0
 
 
@@ -645,7 +695,7 @@ async def run(args):
         hf = HfApi(token=os.environ['HF_TOKEN'])
         repo = os.environ['HF_REPO']
     if args.no_archive:
-        checkpoint.ensure()
+        with_retries(checkpoint.ensure, 'checkpoint ensure')
     # No cloud_inference: sparse vectors are built here, so this same code
     # works against a self-hosted instance, which has no inference service.
     qc = None
@@ -658,7 +708,8 @@ async def run(args):
         for field, schema in [('build_id', models.PayloadSchemaType.KEYWORD),
                              ('worker', models.PayloadSchemaType.INTEGER),
                              ('safety', models.PayloadSchemaType.FLOAT)]:
-            qc.create_payload_index(COLLECTION, field, field_schema=schema, wait=True)
+            with_retries(lambda f=field, s=schema: qc.create_payload_index(
+                COLLECTION, f, field_schema=s, wait=True), 'create_payload_index')
     checkpoint_key = f'checkpoints/{args.build}-{args.workers}-{args.worker}.json'
     categories = [c.strip() for c in (args.categories or '').split(',') if c.strip()]
     topics = []
@@ -678,7 +729,7 @@ async def run(args):
 
     def read_checkpoint():
         if args.no_archive:
-            return checkpoint.load(checkpoint_key)
+            return with_retries(lambda: checkpoint.load(checkpoint_key), 'checkpoint load')
         if args.no_embed:
             from botocore.exceptions import ClientError
             try:
@@ -740,10 +791,16 @@ async def run(args):
     if qc is not None:
         flt = models.Filter(must=[models.FieldCondition(key='build_id', match=models.MatchValue(value=args.build)),
                                   models.FieldCondition(key='worker', match=models.MatchValue(value=args.worker))])
-        done = qc.count(COLLECTION, count_filter=flt, exact=True).count
+        done = with_retries(lambda: qc.count(COLLECTION, count_filter=flt, exact=True).count, 'count')
     if done >= args.target:
         print(f'already complete: {done}/{args.target}', flush=True)
         return
+    if qc is not None and args.stop_at_total:
+        size = collection_size(qc)
+        if goal_met(size, args.stop_at_total):
+            print(f'GOAL: the collection already holds {size:,} >= {args.stop_at_total:,}; '
+                  f'nothing to do', flush=True)
+            return
     # Jobs queued is the worker's whole future: 0 here means it will skip
     # everything and exit green within minutes (inherited an exhausted
     # checkpoint, or a category with nothing in its shards). Loud now so a
@@ -770,6 +827,8 @@ async def run(args):
     archive = Archive(root, hf, repo)
     pending_points = []
     manifest_rows = []
+    # Set by save() once the collection reaches --stop-at-total.
+    goal = {'reached': False}
     manifest_seq = resume_seq
     staged_ids = set()
     start_time, pages, failed, empty = time.monotonic(), 0, 0, 0
@@ -818,13 +877,19 @@ async def run(args):
                 if archive_op:
                     ops.append(archive_op)
             for i in range(0, len(pending_points), 128):
-                qc.upsert(COLLECTION, points=pending_points[i:i + 128], wait=True)
+                batch = pending_points[i:i + 128]
+                with_retries(lambda: qc.upsert(COLLECTION, points=batch, wait=True), 'upsert')
             pending_points.clear()
         staged_ids.clear()
         state = json.dumps({'queue': list(queue), 'uploaded': done, 'done': done,
                             'manifest_seq': manifest_seq, 'pages': pages}).encode()
         if args.no_archive:
-            checkpoint.save(checkpoint_key, json.loads(state))
+            with_retries(lambda: checkpoint.save(checkpoint_key, json.loads(state)), 'checkpoint save')
+            # After the save, so a worker that stops here leaves nothing
+            # unsaved. Once per flush: cheap, and at most one flush of
+            # overshoot per worker.
+            if qc is not None and args.stop_at_total:
+                goal['reached'] = goal_met(collection_size(qc), args.stop_at_total)
             return
         if args.no_embed:
             storage.client().put_object(Bucket=storage.BUCKET, Key=checkpoint_key,
@@ -848,7 +913,8 @@ async def run(args):
                 time.sleep(wait)
 
     async with httpx.AsyncClient(headers={'User-Agent': UA}, follow_redirects=True) as client:
-        while queue and done < args.target and time.monotonic() - start_time < args.max_seconds:
+        while (queue and done < args.target and not goal['reached']
+               and time.monotonic() - start_time < args.max_seconds):
             job = queue[0]
             if 'topic' in job:
                 params = params_for_search(job['topic'], job['lic'], job['band'], job['continue'])
@@ -898,9 +964,9 @@ async def run(args):
                 # earlier and holds no database credentials.
                 seen = set()
                 if qc is not None:
-                    seen = {str(p.id) for p in qc.retrieve(
-                        COLLECTION, ids=[point_id(r['image_id']) for r in rows],
-                        with_payload=False, with_vectors=False)}
+                    wanted_ids = [point_id(r['image_id']) for r in rows]
+                    seen = {str(p.id) for p in with_retries(lambda: qc.retrieve(
+                        COLLECTION, ids=wanted_ids, with_payload=False, with_vectors=False), 'retrieve')}
                 rows = [r for r in rows if point_id(r['image_id']) not in seen | staged_ids][:args.target - done]
             produced = 0
             fetched = 0
@@ -1075,7 +1141,10 @@ async def run(args):
             # actually matters; this is a second, softer brake.
             await asyncio.sleep(0.3)
         save()
-    if exit_code(done, args.target, queue) == 75:
+    if goal['reached']:
+        print(f'GOAL: the collection reached {args.stop_at_total:,}; this worker stops at '
+              f'{done}/{args.target} of its own share. Nothing to resume.', flush=True)
+    if exit_code(done, args.target, queue, goal['reached']) == 75:
         # Not a failure. The worker ran out of wall clock before its quota and
         # has saved its cursor; the next run resumes from there. A 10M build is
         # six runs of twenty workers and MOST of those jobs end this way, so
@@ -1085,7 +1154,7 @@ async def run(args):
         print(f'INCOMPLETE: {done}/{args.target} indexed, {len(queue)} jobs left, '
               f'cursor saved. The build restarts itself to resume.', flush=True)
         raise SystemExit(75)
-    if done < args.target:
+    if done < args.target and not goal['reached']:
         print(f'EXHAUSTED: {done}/{args.target} indexed -- every job in this '
               f"worker's share is spent, so there is nothing to resume.", flush=True)
     if args.no_embed:
@@ -1163,6 +1232,13 @@ if __name__ == '__main__':
     # the forward pass can use just adds contention.
     p.add_argument('--threads', type=int, default=2)
     p.add_argument('--max-seconds', type=int, default=16200)
+    p.add_argument('--stop-at-total', type=int, default=0,
+                   help='stop every worker once the whole collection holds this '
+                        'many points, whatever its own --target says, and exit 0 '
+                        'so the build does not restart. 0 disables it. Lets lanes '
+                        'run past a per-lane quota without overshooting the '
+                        'corpus goal: a quota let fast lanes stop early and the '
+                        'slow ones set the finish.')
     p.add_argument('--no-archive', action='store_true',
                    help='embed on this runner and keep nothing: no bucket, no '
                         'HuggingFace, no derivative stored anywhere. The browser '

@@ -588,3 +588,68 @@ class ResumeSignalTest(unittest.TestCase):
 
     def test_reaching_target_is_finished(self):
         self.assertEqual(cloud_corpus.exit_code(100, 100, [{'topic': 'x'}]), 0)
+
+
+class QdrantRetryTest(unittest.TestCase):
+    """A dropped connection must cost a retry, not a worker: one killed worker
+    45 of build 10m-0911 an hour into its window."""
+
+    def dropped(self):
+        from qdrant_client.http.exceptions import ResponseHandlingException
+        return ResponseHandlingException(httpx.RemoteProtocolError(
+            'peer closed connection without sending complete message body'))
+
+    def test_a_dropped_connection_is_retried_until_it_succeeds(self):
+        calls, naps = [], []
+        def flaky():
+            calls.append(1)
+            if len(calls) < 3:
+                raise self.dropped()
+            return 'ok'
+        self.assertEqual(cloud_corpus.with_retries(flaky, 'retrieve', sleep=naps.append), 'ok')
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(naps, list(cloud_corpus.QDRANT_RETRY_DELAYS[:2]))
+
+    def test_it_gives_up_after_the_last_delay(self):
+        calls, naps = [], []
+        def down():
+            calls.append(1)
+            raise self.dropped()
+        with self.assertRaises(Exception):
+            cloud_corpus.with_retries(down, 'upsert', sleep=naps.append)
+        self.assertEqual(len(calls), len(cloud_corpus.QDRANT_RETRY_DELAYS) + 1)
+        self.assertEqual(naps, list(cloud_corpus.QDRANT_RETRY_DELAYS))
+
+    def test_a_real_error_is_not_retried(self):
+        calls, naps = [], []
+        def broken():
+            calls.append(1)
+            raise ValueError('bad request shape')
+        with self.assertRaises(ValueError):
+            cloud_corpus.with_retries(broken, 'count', sleep=naps.append)
+        self.assertEqual((len(calls), naps), (1, []))
+
+    def test_server_errors_retry_and_client_errors_do_not(self):
+        from qdrant_client.http.exceptions import UnexpectedResponse
+        def status(code):
+            return UnexpectedResponse(code, 'x', b'', httpx.Headers())
+        self.assertTrue(cloud_corpus.transient_qdrant_error(status(503)))
+        self.assertTrue(cloud_corpus.transient_qdrant_error(status(429)))
+        self.assertFalse(cloud_corpus.transient_qdrant_error(status(400)))
+        self.assertTrue(cloud_corpus.transient_qdrant_error(httpx.ReadTimeout('slow')))
+
+
+class GoalStopTest(unittest.TestCase):
+    """--stop-at-total ends the whole build at the corpus goal, so lanes can run
+    past a per-lane quota without the build overshooting it."""
+
+    def test_goal_met_only_at_or_past_the_line(self):
+        self.assertTrue(cloud_corpus.goal_met(10_000_000, 10_000_000))
+        self.assertFalse(cloud_corpus.goal_met(9_999_999, 10_000_000))
+
+    def test_zero_disables_the_goal(self):
+        self.assertFalse(cloud_corpus.goal_met(50_000_000, 0))
+
+    def test_reaching_the_goal_ends_the_build_with_jobs_left(self):
+        # Exit 0, not 75: no resume flag, so the build stops instead of restarting.
+        self.assertEqual(cloud_corpus.exit_code(10, 1_000_000, [{'topic': 'x'}], goal_reached=True), 0)
