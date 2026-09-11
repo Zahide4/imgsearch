@@ -56,13 +56,31 @@ on:
         required: true
       workers:
         description: >-
-          How many parallel crawlers. Must match the account's Actions
-          concurrency: 20 on Free, 40 on Pro, 60 on Team. Changing it
-          reshuffles range assignment AND invalidates every saved cursor,
+          TOTAL crawlers in the build, across every repo taking part. Changing
+          it reshuffles job assignment AND invalidates every saved cursor,
           because the checkpoint key contains the worker count -- so pick a
-          number and keep it for the whole build.
+          number and keep it for the whole build. Each repo's Actions
+          concurrency caps how many run at once there: 20 on Free, 40 on Pro.
         default: '20'
         required: true
+      first_worker:
+        description: >-
+          First worker index this repo runs. Leave 0 for a single-repo build.
+          To split one build across accounts, give every repo the same
+          `workers` and `build` and non-overlapping slices -- e.g. workers=60
+          with first_worker=0 lanes=40 on the Pro account and first_worker=40
+          lanes=20 on the Free one. Both must dispatch the SAME commit: every
+          runner computes job assignment on its own from the code, the topic
+          list and its sidecar, and any difference makes two runners crawl the
+          same shards while others go untouched.
+        default: '0'
+        required: false
+      lanes:
+        description: >-
+          How many workers, from first_worker on, this repo runs. Empty means
+          every remaining worker.
+        default: ''
+        required: false
 
 permissions:
   contents: read
@@ -79,8 +97,22 @@ jobs:
       matrix: ${{ steps.gen.outputs.matrix }}
     steps:
       - id: gen
+        # Inputs come in through env rather than ${{ }} spliced into the script.
+        env:
+          TOTAL: ${{ inputs.workers }}
+          FIRST: ${{ inputs.first_worker }}
+          LANES: ${{ inputs.lanes }}
         run: |
-          python3 -c "import json;print('matrix='+json.dumps(list(range(${{ inputs.workers }}))))" >> "$GITHUB_OUTPUT"
+          python3 - >> "$GITHUB_OUTPUT" <<'PY'
+          import json, os
+          total = int(os.environ['TOTAL'])
+          first = int(os.environ.get('FIRST') or 0)
+          lanes = int(os.environ.get('LANES') or total - first)
+          # A bad slice must stop the build here, not quietly run the wrong workers.
+          if total < 1 or not 0 <= first < total or lanes < 1:
+              raise SystemExit(f'bad slice: first_worker={first} lanes={lanes} workers={total}')
+          print('matrix=' + json.dumps(list(range(first, min(first + lanes, total)))))
+          PY
 
   build:
     needs: plan
