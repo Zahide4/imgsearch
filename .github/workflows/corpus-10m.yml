@@ -41,6 +41,15 @@ on:
           layer). Empty means the default filename-range allimages walk.
         default: ''
         required: false
+      topics:
+        description: >-
+          Optional path to a topic list for a relevance-ordered
+          generator=search harvest, sharded by licence category and width
+          band (e.g. topics-10m.txt). Takes precedence over `categories`.
+          A `<name>.hits.json` sidecar beside it balances the lanes by
+          measured shard size instead of striding them blindly.
+        default: ''
+        required: false
       max_seconds:
         description: Wall clock per job, under the 6 h runner ceiling
         default: '16200'
@@ -123,6 +132,7 @@ jobs:
           TARGET: ${{ inputs.target_per_worker }}
           BUILD: ${{ inputs.build }}
           CATEGORIES: ${{ inputs.categories }}
+          TOPICS: ${{ inputs.topics }}
           MAX_SECONDS: ${{ inputs.max_seconds }}
           WORKER: ${{ matrix.worker }}
           WORKERS: ${{ inputs.workers }}
@@ -132,6 +142,7 @@ jobs:
             --worker "$WORKER" --workers "$WORKERS" \
             --target "$TARGET" --build "$BUILD" \
             --categories "$CATEGORIES" \
+            --topics "$TOPICS" \
             --threads 2 --max-seconds "$MAX_SECONDS"
           code=$?
           set -e

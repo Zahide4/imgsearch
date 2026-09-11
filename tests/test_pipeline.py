@@ -239,6 +239,15 @@ class RefusalTests(unittest.IsolatedAsyncioTestCase):
             r=await self.client.get('/api/search',params={'q':q})
             self.assertNotIn('refusal',r.json(),msg=q)
 
+    async def test_slur_exceptions_pass_while_bare_terms_refuse(self):
+        for q in ['chink of light','chink in the armour','chink in the armor',
+                  'dyke landscape','sea dyke','dutch dyke']:
+            r=await self.client.get('/api/search',params={'q':q})
+            self.assertNotIn('refusal',r.json(),msg=q)
+        for q in ['chink','dyke']:
+            r=await self.client.get('/api/search',params={'q':q})
+            self.assertEqual(r.json().get('refusal'),api.REFUSAL_MESSAGE,msg=q)
+
     async def test_cosine_backstop(self):
         import numpy as np
         api._ADULT=np.array([[1.0]+[0.0]*767])
@@ -437,3 +446,129 @@ class ImageFetchResilience(unittest.IsolatedAsyncioTestCase):
 
 
 if __name__=='__main__':unittest.main()
+
+
+class SearchHarvestTest(unittest.TestCase):
+    """generator=search harvesting, sharded by licence and width band."""
+
+    def test_jobs_partition_without_overlap_or_loss(self):
+        topics = ['sunset', 'coffee', 'temple']
+        jobs = [cloud_corpus.search_jobs(topics, cloud_corpus.CLEAN_LICENCES, w, 4)
+                for w in range(4)]
+        flat = [(j['topic'], j['lic'], j['band']) for js in jobs for j in js]
+        expected = len(topics) * len(cloud_corpus.CLEAN_LICENCES) * len(cloud_corpus.WIDTH_BANDS)
+        self.assertEqual(len(flat), expected)
+        self.assertEqual(len(set(flat)), expected, 'a shard was issued twice')
+
+    def test_every_worker_spans_every_topic(self):
+        # Strided assignment, so one worker is never camped on one subject and
+        # a finished topic does not leave a lane idle.
+        topics = ['sunset', 'coffee', 'temple']
+        for w in range(4):
+            covered = {j['topic'] for j in cloud_corpus.search_jobs(
+                topics, cloud_corpus.CLEAN_LICENCES, w, 4)}
+            self.assertEqual(covered, set(topics))
+
+    def test_width_bands_do_not_share_a_boundary(self):
+        # `filew:>N` and `filew:<N` both INCLUDE N, so adjacent bands would
+        # double-count the boundary. Measured: sunset+CC-Zero is 21,179, and
+        # >3000 / <3000 return 17,186 / 4,193 -- 200 too many, which is exactly
+        # `filew:3000`. The bands must be >N and <N-1.
+        highs = [int(b.split('>')[1]) for b in cloud_corpus.WIDTH_BANDS if '>' in b]
+        lows = [int(b.split('<')[1]) for b in cloud_corpus.WIDTH_BANDS if '<' in b]
+        for hi in highs:
+            for lo in lows:
+                self.assertLess(lo, hi, 'width bands overlap at their boundary')
+
+    def test_query_shape(self):
+        params = cloud_corpus.params_for_search('sunset', 'CC-Zero', 'filew:>3000',
+                                                {'gsroffset': 50})
+        self.assertEqual(params['generator'], 'search')
+        self.assertEqual(params['gsroffset'], 50)
+        self.assertIn('incategory:"CC-Zero"', params['gsrsearch'])
+        self.assertIn('filetype:bitmap', params['gsrsearch'])
+        # 384 is what is stored, and asking for more pushes the fetch onto the
+        # strict host. Shared with both other walkers.
+        self.assertEqual(params['iiurlwidth'], 384)
+
+
+    def test_embed_chunk_runs_standalone(self):
+        """It runs in a worker thread, so it must not lean on names the caller
+        happened to import. A NameError here reached a runner once: torch is
+        imported inside main(), embed_chunk is module scope, and every other
+        test stubbed it out, so nothing ever executed the real one."""
+        import torch as _torch
+
+        class FakeModel:
+            def encode_image(self, batch):
+                return _torch.ones(batch.shape[0], 768)
+
+        chunk = [({'image_id': f'x{i}'}, _torch.zeros(3, 224, 224), b'')
+                 for i in range(4)]
+        out = cloud_corpus.embed_chunk(FakeModel(), lambda im: im, chunk)
+        self.assertEqual(out.shape, (4, 768))
+        self.assertAlmostEqual(float((out[0] ** 2).sum()), 1.0, places=4)
+
+    def test_bin_packing_beats_striding_on_makespan(self):
+        # Striding ignores shard size. On the Quality/Featured/Valued run that
+        # left 9 of 40 lanes with zero rows while the busiest took 24,906
+        # against a 10,387 average. Shard size is known here, so it should not
+        # happen again.
+        topics = [f't{i}' for i in range(200)]
+        # Deliberately lopsided: a few huge topics and a long thin tail, which
+        # is the real shape (median 26,751 hits, max in the millions).
+        hits = {t: (500_000 if i < 8 else 800) for i, t in enumerate(topics)}
+        lic = cloud_corpus.CLEAN_LICENCES
+
+        def spread(weights):
+            loads = []
+            for w in range(40):
+                jobs = cloud_corpus.search_jobs(topics, lic, w, 40, weights)
+                loads.append(sum(cloud_corpus.job_weight(j['topic'], lic, hits)
+                                 for j in jobs))
+            return max(loads) / max(min(loads), 1e-9)
+
+        # Not "perfectly flat": shards are indivisible and capped at 10,000, so
+        # with 128 full-size jobs over 40 lanes somebody must take four of them.
+        # The guarantee LPT actually offers is 4/3 of optimal makespan.
+        loads = []
+        for w in range(40):
+            jobs = cloud_corpus.search_jobs(topics, lic, w, 40, hits)
+            loads.append(sum(cloud_corpus.job_weight(j['topic'], lic, hits)
+                             for j in jobs))
+        ideal = sum(loads) / len(loads)
+        self.assertLess(max(loads) / ideal, 4 / 3, 'worse than the LPT bound')
+        self.assertLess(spread(hits), spread(None), 'bin packing lost to striding')
+
+    def test_every_worker_gets_work_when_sizes_are_lopsided(self):
+        # The failure that actually cost wall clock was idle lanes, not uneven
+        # ones. No lane may come back empty while jobs remain.
+        topics = [f't{i}' for i in range(60)]
+        hits = {t: (900_000 if i == 0 else 100) for i, t in enumerate(topics)}
+        for w in range(40):
+            self.assertTrue(cloud_corpus.search_jobs(
+                topics, cloud_corpus.CLEAN_LICENCES, w, 40, hits),
+                f'worker {w} drew no jobs')
+
+    def test_packing_is_identical_on_every_worker(self):
+        # No coordination: each worker derives the same assignment alone. If
+        # two workers disagreed they would double-crawl and leave holes.
+        topics = ['a', 'b', 'c', 'd']
+        hits = {'a': 90_000, 'b': 40_000, 'c': 9_000, 'd': 900}
+        lic = cloud_corpus.CLEAN_LICENCES
+        seen = [tuple((j['topic'], j['lic'], j['band'])
+                      for j in cloud_corpus.search_jobs(topics, lic, w, 6, hits))
+                for w in range(6)]
+        flat = [j for lane in seen for j in lane]
+        self.assertEqual(len(flat), len(set(flat)), 'a shard landed on two workers')
+        again = [tuple((j['topic'], j['lic'], j['band'])
+                       for j in cloud_corpus.search_jobs(topics, lic, w, 6, hits))
+                 for w in range(6)]
+        self.assertEqual(seen, again, 'assignment is not deterministic')
+
+    def test_licence_default_excludes_share_alike(self):
+        # The app hides share-alike by default, so a harvest that includes it
+        # spends crawl hours on images most users never see.
+        self.assertTrue(cloud_corpus.CLEAN_LICENCES)
+        for lic in cloud_corpus.CLEAN_LICENCES:
+            self.assertNotIn('SA', lic.upper().replace('-', ''))

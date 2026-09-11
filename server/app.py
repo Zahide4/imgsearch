@@ -104,6 +104,15 @@ REFUSAL_CORE = frozenset({
 REFUSAL_EXCEPTIONS = {
     'sperm': ('sperm whale',),
     'spic': ('spic and span',),
+    # Slur terms with live legitimate uses (measured, not guessed):
+    # Dutch water infrastructure is "dyke" in English; "chink of light" /
+    # "chink in the armour" are idioms. The cosine backstop cannot cover
+    # these -- it is calibrated on adult concepts, which slurs do not score
+    # against -- so the phrases are carved out while the bare terms stay
+    # refused. Honest cost, per review: this list never ends; the refusal
+    # log must be READ for new collisions, not just written.
+    'chink': ('chink of light', 'chink in the armour', 'chink in the armor'),
+    'dyke': ('dyke landscape', 'dyke landscapes', 'sea dyke', 'dutch dyke'),
 }
 ADULT_PROMPTS = [
     'pornography',

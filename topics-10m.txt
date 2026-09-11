@@ -6,7 +6,10 @@
 # under 1,000 -- it projected to ~3.5M indexed, not 10M, because Cirrus ANDs
 # terms and a 3-4 word phrase retrieves almost nothing ("silicon wafer rainbow"
 # = 1 file, "anechoic chamber wedges" = 1). Topics under 2,000 hits were
-# replaced with measured alternatives in the same section.
+# replaced with measured alternatives in the same section -- EXCEPT a
+# named/high-intent shelf (500-1,999 hits) kept deliberately: amalfi coast,
+# milford sound, osaka castle, wat arun. Small yield, but nobody typing a
+# proper noun wants a generic substitute, and BM25 is strongest exactly there.
 # Projection with the same model: 3,530,221 -> 9,735,973 indexed.
 #
 # HOW TO ADD A TOPIC: measure it first. Anything under 2,000 bitmap hits is
@@ -145,6 +148,29 @@ avalanche
 salt flat
 dew
 volcanic crater
+
+# named/high-intent shelf, exempt from the 2,000-hit floor:
+# few images each, but nobody typing these wants a generic substitute,
+# and proper nouns are where hybrid BM25 beats dense-only.
+black sand beach
+karst caves
+amalfi coast
+giants causeway
+milford sound
+copacabana beach
+pamukkale
+santorini caldera
+greenland iceberg
+white cliffs of dover
+iceland landscape
+iguassu falls
+cliffs of moher
+salar de uyuni
+sahara dunes
+kawah ijen
+cappadocia balloons
+mount kilimanjaro
+angel falls
 
 # --- A2 cities streets architecture interiors (class A) ---
 city skyline night
@@ -385,6 +411,59 @@ courtyard garden
 wrought iron gate
 shrine gate
 
+# named/high-intent shelf, exempt from the 2,000-hit floor:
+# few images each, but nobody typing these wants a generic substitute,
+# and proper nouns are where hybrid BM25 beats dense-only.
+gyeongbok palace
+wat arun
+osaka castle
+marina bay sands
+istanbul grand bazaar
+munich marienplatz
+cave dwelling
+lalibela churches
+colosseum interior
+itsukushima shrine
+galata tower
+edinburgh royal mile
+karnak hall
+roman rooftops
+hagia sophia interior
+shibuya crossing
+petronas towers
+moai statues
+hawa mahal
+meenakshi temple
+victoria peak view
+sagrada familia interior
+shwedagon pagoda
+buenos aires caminito
+nikko shrine
+shinjuku night
+treehouse
+petra treasury
+hanok village
+brownstone street
+hamburg harbour
+saqqara pyramid
+pantheon dome
+dubrovnik walls
+todaiji hall
+hutong alley
+ephesus library
+petra monastery
+djemila ruins
+persepolis columns
+ephesus theatre
+city skyline day
+borobudur stupas
+marrakech medina
+lima barranco
+nile felucca
+louvre courtyard
+tea house interior
+ait benhaddou
+
 # --- A3 named places overflow shelf (class A) ---
 # City-by-city, monument-by-monument: BM25 wins on proper nouns. Thin or
 # filler entries were cut; what remains is photographed enough to retrieve.
@@ -437,6 +516,19 @@ dubrovnik
 shiraz
 odessa
 
+# named/high-intent shelf, exempt from the 2,000-hit floor:
+# few images each, but nobody typing these wants a generic substitute,
+# and proper nouns are where hybrid BM25 beats dense-only.
+hyderabad charminar
+mumbai gateway
+seychelles anse source
+wadi hadramawt
+kolkata howrah bridge
+delhi lotus temple
+sukhothai buddhas
+lucknow bara imambara
+reunion piton volcano
+
 # --- A4 weather sky aerials (class A) ---
 thunderstorm
 lightning
@@ -477,6 +569,16 @@ drone view
 storm cloud
 twilight
 hailstorm
+
+# named/high-intent shelf, exempt from the 2,000-hit floor:
+# few images each, but nobody typing these wants a generic substitute,
+# and proper nouns are where hybrid BM25 beats dense-only.
+snowfall forest
+mammatus clouds
+milky way desert
+aerial coastline
+drone city night
+aerial farmland
 
 # --- B1 animals and wildlife, gated iconic only (class B, share 2.15M) ---
 # No taxonomic sweep: specimen photography is the trap. Iconic species,
@@ -554,6 +656,20 @@ elk
 heron
 dolphin
 sparrow
+
+# named/high-intent shelf, exempt from the 2,000-hit floor:
+# few images each, but nobody typing these wants a generic substitute,
+# and proper nouns are where hybrid BM25 beats dense-only.
+clownfish anemone
+penguin colony
+lobster trap
+eagle hunting
+salmon run
+shark reef
+snake coiled
+owl in flight
+flamingo flock
+frog on leaf
 
 # --- B2 food and drink, dish first (class B) ---
 # Coffee dies at rank ~1000: many narrow topics, not few broad ones.
@@ -637,6 +753,34 @@ coffee beans
 kitchen counter
 samosa
 
+# named/high-intent shelf, exempt from the 2,000-hit floor:
+# few images each, but nobody typing these wants a generic substitute,
+# and proper nouns are where hybrid BM25 beats dense-only.
+roast chicken
+pasta carbonara
+espresso shot
+pretzel
+full english breakfast
+sashimi
+burrito bowl
+biryani
+gnocchi
+spring rolls
+ice cream sundae
+bakery display
+gelato cones
+paella pan
+cappuccino art
+pour over coffee
+fruit stall
+matcha whisk
+tiramisu cup
+risotto
+turkish coffee pot
+miso soup
+thali plate
+vegetable stall
+
 # --- B3 plants flowers garden, gated (class B) ---
 oak tree
 fern frond
@@ -671,6 +815,18 @@ hydrangea
 jasmine
 seaweed
 bougainvillea
+
+# named/high-intent shelf, exempt from the 2,000-hit floor:
+# few images each, but nobody typing these wants a generic substitute,
+# and proper nouns are where hybrid BM25 beats dense-only.
+ivy wall
+greenhouse orchids
+japanese garden bridge
+maple leaf red
+rose garden rows
+vegetable garden rows
+peony bloom
+venus flytrap
 
 # --- B4 transport and machines (class B) ---
 steam locomotive
@@ -725,6 +881,24 @@ rickshaw
 forklift
 biplane
 sidecar
+
+# named/high-intent shelf, exempt from the 2,000-hit floor:
+# few images each, but nobody typing these wants a generic substitute,
+# and proper nouns are where hybrid BM25 beats dense-only.
+bicycle amsterdam
+3d printer layers
+excavator bucket
+turbine hall
+wind turbine blades
+container port cranes
+yacht regatta
+subway train doors
+bullet train
+freight train night
+steam engine pistons
+cruise ship stern
+tram car interior
+dry dock hull
 
 # --- B5 objects tools instruments (class B) ---
 # Serve the object on plain ground where it exists; never a cutout bucket.
@@ -784,6 +958,19 @@ hourglass
 spinning wheel
 pocket watch
 chess set
+
+# named/high-intent shelf, exempt from the 2,000-hit floor:
+# few images each, but nobody typing these wants a generic substitute,
+# and proper nouns are where hybrid BM25 beats dense-only.
+book stack library
+microscope laboratory
+flute silver
+oil lamp diya
+camera lenses row
+jewellery box
+handbag street
+smartphone hand
+chandelier ballroom
 
 # --- C1 painting drawing print, PD-framed (class C, share 2.3M, PD only) ---
 # Named artists dead 100+ years or genres; the licence shard filters, topics lean.
@@ -851,6 +1038,19 @@ byzantine mosaic
 art nouveau print
 mughal miniature
 
+# named/high-intent shelf, exempt from the 2,000-hit floor:
+# few images each, but nobody typing these wants a generic substitute,
+# and proper nouns are where hybrid BM25 beats dense-only.
+canaletto venice
+vermeer milkmaid
+ingres odalisque
+poussin arcadia
+bosch triptych
+baroque ceiling fresco
+homer gulf stream
+velazquez meninas
+millet gleaners
+
 # --- C2 historical documentary photography (class C) ---
 daguerreotype portrait
 tintype soldier
@@ -898,6 +1098,17 @@ early telephone
 suffragette
 trench warfare
 
+# named/high-intent shelf, exempt from the 2,000-hit floor:
+# few images each, but nobody typing these wants a generic substitute,
+# and proper nouns are where hybrid BM25 beats dense-only.
+jerusalem jaffa gate
+bombay victoria terminus
+queen victoria diamond
+vienna ringstrasse
+san francisco earthquake ruins
+child labor mill boy
+home front riveters
+
 # --- C3 posters advertising ephemera patents (class C) ---
 vaudeville poster
 i want you poster
@@ -924,6 +1135,13 @@ advertising card
 railway timetable
 matchbox label
 
+# named/high-intent shelf, exempt from the 2,000-hit floor:
+# few images each, but nobody typing these wants a generic substitute,
+# and proper nouns are where hybrid BM25 beats dense-only.
+art nouveau poster
+bell patent telephone
+sewing machine patent
+
 # --- C4 manuscripts botanical plates decorative maps (class C, capped) ---
 book of hours calendar
 ptolemy world map
@@ -949,6 +1167,12 @@ celestial atlas
 ornithology plate
 bestiary
 
+# named/high-intent shelf, exempt from the 2,000-hit floor:
+# few images each, but nobody typing these wants a generic substitute,
+# and proper nouns are where hybrid BM25 beats dense-only.
+shahnameh rostam
+audubon flamingo
+
 # --- D1 faiths rites holy practice (class D, share 900k, raised from 550k) ---
 # Highest demand-to-supply-elsewhere ratio measured; Commons is deep here.
 church congregation
@@ -969,6 +1193,12 @@ buddhist monk
 pilgrimage
 prayer beads
 temple interior
+
+# named/high-intent shelf, exempt from the 2,000-hit floor:
+# few images each, but nobody typing these wants a generic substitute,
+# and proper nouns are where hybrid BM25 beats dense-only.
+sarnath stupa
+friday prayer mosque
 
 # --- D2 festivals calendar (class D) ---
 durga puja pandal
@@ -995,6 +1225,15 @@ passover
 oktoberfest
 purim
 eid al adha
+
+# named/high-intent shelf, exempt from the 2,000-hit floor:
+# few images each, but nobody typing these wants a generic substitute,
+# and proper nouns are where hybrid BM25 beats dense-only.
+venice carnival masks
+holi colours
+inti raymi cusco
+chinese new year dragon dance
+onam pookalam
 
 # --- D3 dress ritual objects (class D) ---
 sari draping
@@ -1025,6 +1264,11 @@ comet
 solar eclipse
 moon surface
 
+# named/high-intent shelf, exempt from the 2,000-hit floor:
+# few images each, but nobody typing these wants a generic substitute,
+# and proper nouns are where hybrid BM25 beats dense-only.
+iss over earth
+
 # --- E2 deep sky named objects (class E) ---
 andromeda galaxy
 orion nebula
@@ -1034,6 +1278,11 @@ helix nebula eye
 pleiades star cluster
 earth from orbit
 city lights at night
+
+# named/high-intent shelf, exempt from the 2,000-hit floor:
+# few images each, but nobody typing these wants a generic substitute,
+# and proper nouns are where hybrid BM25 beats dense-only.
+whirlpool galaxy
 
 # --- E3 earth observation from orbit (class E) ---
 earth from space night
@@ -1224,3 +1473,9 @@ market trader
 tailor
 hands working
 shoemaker
+
+# named/high-intent shelf, exempt from the 2,000-hit floor:
+protest march banners
+construction workers beam
+music festival crowd
+rickshaw puller

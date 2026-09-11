@@ -15,6 +15,7 @@ import re
 import string
 import tarfile
 import time
+import pathlib
 import unicodedata
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -124,6 +125,93 @@ def category_jobs(categories, worker, workers):
     return all_jobs[worker::workers]
 
 
+# Two width bands, not more: `filew:>N` and `filew:<N` BOTH include N
+# (measured -- sunset+CC-Zero splits 17,186 / 4,193 against a 21,179 total, and
+# `filew:3000` alone is 200), so bands must not share a boundary. `<2999` plus
+# `>3000` sums to exactly 21,179: exhaustive and disjoint. Cirrus has no range
+# form (`filew:1500..2999` returns nothing), so two is what the syntax allows --
+# and two is enough. Eight licence shards times two bands is sixteen queries per
+# topic at 10,000 each, which is more depth than any topic's clean pool holds.
+WIDTH_BANDS = ['filew:>3000', 'filew:<2999']
+
+# Commercially clean licence categories, in rough descending size. Sharding on
+# these does three things at once: it keeps share-alike out of a corpus the app
+# hides by default (56% of an unsharded harvest), it multiplies the 10,000-result
+# cap by the number of shards, and it makes every crawled image one a default
+# user can actually see.
+CLEAN_LICENCES = ['CC-Zero', 'CC-BY-4.0', 'CC-BY-2.0', 'CC-BY-3.0',
+                  'CC-PD-Mark', 'PD-old-100-expired', 'PD-self', 'PD-1996']
+
+
+def job_weight(topic, licences, hits):
+    """Rows a (topic, licence, band) shard is expected to yield.
+
+    Only relative size matters, so the clean-licence fraction cancels out. The
+    10,000 cap does not: it is where the search API stops paginating, and a
+    200,000-hit topic is not twenty times the work of a 10,000-hit one.
+    """
+    shards = max(1, len(licences) * len(WIDTH_BANDS))
+    return min(10000.0, max(hits.get(topic, 0), 0) / shards) or 1.0
+
+
+def search_jobs(topics, licences, worker, workers, hits=None):
+    """One job per (topic, licence, width band), balanced across workers.
+
+    Search order is relevance order, so a partial job keeps the BEST of its
+    slice rather than an arbitrary alphabetical one -- the whole reason this
+    beats the category walk.
+
+    Assignment is longest-processing-time-first bin packing, NOT the
+    `jobs[worker::workers]` striding the other two walkers use. Measured on the
+    Quality/Featured/Valued run, striding left NINE of forty lanes with zero
+    rows while the busiest took 24,906 against a 10,387 average -- a 2.4x
+    penalty on wall clock, because a lane that draws empty shards exits instead
+    of helping. README.md records the same failure from the 500k run and
+    prescribes a claim queue; that needs a lock server, and Qdrant is a poor
+    one. Bin packing needs no coordination at all -- every worker derives the
+    same assignment from the same inputs -- and it is available here for a
+    reason the alphabet-shard walkers cannot match: shard size is KNOWN before
+    the crawl, because every topic's Commons hit count was measured. LPT is
+    within 4/3 of optimal makespan, and in practice far closer.
+
+    Without measured hits it falls back to shuffled striding, which is the old
+    behaviour and the old imbalance.
+    """
+    all_jobs = [{'topic': t, 'lic': lic, 'band': band, 'continue': {}}
+                for t in topics for lic in licences for band in WIDTH_BANDS]
+    if not hits:
+        random.Random(20260910).shuffle(all_jobs)
+        return all_jobs[worker::workers]
+    # Deterministic order, so every worker packs the bins identically without
+    # talking to any other worker.
+    ordered = sorted(all_jobs,
+                     key=lambda j: (-job_weight(j['topic'], licences, hits),
+                                    j['topic'], j['lic'], j['band']))
+    load = [0.0] * workers
+    bins = [[] for _ in range(workers)]
+    for job in ordered:
+        light = min(range(workers), key=lambda i: (load[i], i))
+        bins[light].append(job)
+        load[light] += job_weight(job['topic'], licences, hits)
+    return bins[worker]
+
+
+def params_for_search(topic, lic, band, continuation):
+    # Relevance harvest. Same imageinfo shape as the other two walkers, so
+    # metadata(), fetch, embed, safety and upsert are untouched downstream.
+    # gsrlimit maxes at 50 (500 is bot-only), which is ten times the requests
+    # per image of the allimages walk and still negligible beside 50 image
+    # fetches per page.
+    params = dict(action='query', format='json', formatversion=2,
+                  generator='search', gsrnamespace=6, gsrlimit=50,
+                  gsrsearch=f'{topic} filetype:bitmap incategory:"{lic}" {band}',
+                  prop='imageinfo', iiprop='url|size|extmetadata|mime|sha1',
+                  iiurlwidth=384, maxlag=5)
+    params.update(continuation)  # gsroffset
+    return {k: unicodedata.normalize('NFC', v) if isinstance(v, str) else v
+            for k, v in params.items()}
+
+
 def params_for(start, end, continuation):
     params = dict(action='query', format='json', formatversion=2,
                   generator='allimages', gailimit=50, gaisort='name', gaifrom=start,
@@ -168,6 +256,104 @@ def params_for_category(cat, start, end, continuation):
     params.update(continuation)  # retain sortkey position during imageinfo continuation
     return {k: unicodedata.normalize('NFC', v) if isinstance(v, str) else v
             for k, v in params.items()}
+
+
+class Relevance:
+    """Scores a harvested batch against the topic that retrieved it.
+
+    The quality gate in the first corpus plan asked a generic question -- "is
+    this a photograph?" -- which cannot tell a good photograph of a car park
+    from a good photograph of a sunset when you searched for a sunset. Asking
+    the specific question costs the same matmul, because the image vector is
+    already in memory, and it drops scanned book pages for free: a book page
+    scores near zero against "a photo of sunset" without anyone writing a
+    prompt for book pages.
+
+    Thresholds are RELATIVE to each topic's own opening batch, never absolute.
+    Measured across topics, the same "clearly relevant" band lands anywhere
+    from .03 to .53 depending only on how the prompt embeds, so one global
+    constant would gate some topics to nothing and others not at all.
+    """
+
+    def __init__(self, model, tokenizer, device='cpu'):
+        import torch
+        self.model, self.tokenizer, self.device = model, tokenizer, device
+        self.torch = torch
+        self.cache = {}
+        # Same sigmoid calibration as safety.py: SigLIP trains with a sigmoid
+        # loss, so sigmoid(scale * cos + bias) is the model's own probability.
+        # Softmaxing at this scale is a hard argmax and ranks nonsense first --
+        # that mistake cost a rewrite once already.
+        self.scale = float(model.logit_scale.exp().detach().cpu())
+        self.bias = float(model.logit_bias.detach().cpu()) if hasattr(
+            model, 'logit_bias') else 0.0
+
+    def vector(self, topic):
+        if topic not in self.cache:
+            with self.torch.inference_mode():
+                tokens = self.tokenizer([f'a photo of {topic}']).to(self.device)
+                text = self.model.encode_text(tokens)
+                text = text / text.norm(dim=-1, keepdim=True)
+            self.cache[topic] = text.float().cpu().numpy().astype(np.float32)[0]
+        return self.cache[topic]
+
+    def score(self, topic, vectors):
+        with np.errstate(divide='ignore', over='ignore', invalid='ignore'):
+            logits = self.scale * (vectors @ self.vector(topic)) + self.bias
+            probability = 1.0 / (1.0 + np.exp(-np.clip(logits, -60, 60)))
+        if not np.isfinite(probability).all():
+            raise RuntimeError('Non-finite relevance score; refusing to gate')
+        return probability
+
+
+def embed_chunk(model, preprocess, chunk):
+    """Preprocess and run the image tower. Runs in a thread; no async here.
+
+    torch is imported here rather than at module scope because the rest of this
+    file does the same: the crawl-only and no-embed paths never load it, and on
+    those runs importing it costs seconds and hundreds of megabytes for nothing.
+    """
+    import torch
+    import torch.nn.functional as F
+    batch = torch.stack([preprocess(im) for _, im, _ in chunk])
+    with torch.inference_mode():
+        return F.normalize(model.encode_image(batch), dim=-1).float().numpy()
+
+
+async def batches_as_fetched(client, rows, limiter, size, encode_webp):
+    """Yield batches of fetched images as they land, not after all of them do.
+
+    The old shape was `await asyncio.gather(...)` for the whole page and only
+    then the embed loop, so a page cost fetch-time PLUS embed-time. Measured on
+    a finished lane: 46.2 images per productive page in 18.14s = 2.55 img/s,
+    against README's bench of 5.4 fetching alone and 4.8 embedding alone. That
+    2.55 is the bench's own "coupled, no overlap" figure of 2.5 -- the two
+    halves were taking turns.
+
+    Streaming batches out as they complete lets the caller embed batch N while
+    batches N+1.. are still downloading. Paired with running the forward pass
+    in a thread (so the event loop stays free to drive the sockets), the page
+    cost goes from fetch+embed to max(fetch, embed).
+    """
+    tasks = [asyncio.create_task(fetch_image(client, row, limiter, encode_webp=encode_webp))
+             for row in rows]
+    buffer = []
+    try:
+        for done_task in asyncio.as_completed(tasks):
+            got = await done_task
+            if got:
+                buffer.append(got)
+            if len(buffer) >= size:
+                yield buffer[:size]
+                buffer = buffer[size:]
+        if buffer:
+            yield buffer
+    finally:
+        # A break upstream (target reached, window closed) must not leave
+        # sockets open behind us.
+        for task in tasks:
+            if not task.done():
+                task.cancel()
 
 
 def clean_url(url):
@@ -462,6 +648,20 @@ async def run(args):
             qc.create_payload_index(COLLECTION, field, field_schema=schema, wait=True)
     checkpoint_key = f'checkpoints/{args.build}-{args.workers}-{args.worker}.json'
     categories = [c.strip() for c in (args.categories or '').split(',') if c.strip()]
+    topics = []
+    if args.topics:
+        topics = [t.strip() for t in pathlib.Path(args.topics).read_text().splitlines()
+                  if t.strip() and not t.strip().startswith('#')]
+    licences = [l.strip() for l in (args.licences or '').split(',') if l.strip()] or CLEAN_LICENCES
+    # Measured Commons hit counts, if they sit beside the topic list. Present
+    # means bin-packed lanes; absent means the old striding, and the old tail.
+    topic_hits = {}
+    if args.topics:
+        sidecar = pathlib.Path(args.topics).with_suffix('.hits.json')
+        if sidecar.exists():
+            topic_hits = {k: int(v) for k, v in json.loads(sidecar.read_text()).items()}
+            print(f'worker {args.worker}: balancing lanes from {len(topic_hits)} '
+                  f'measured topic sizes', flush=True)
 
     def read_checkpoint():
         if args.no_archive:
@@ -504,8 +704,13 @@ async def run(args):
                 token=os.environ['HF_TOKEN'])).read_text())
         except EntryNotFoundError:
             return None
-    queue = deque(category_jobs(categories, args.worker, args.workers) if categories
-                  else ({'start': lo, 'end': hi, 'continue': {}} for lo, hi in ranges(args.worker, args.workers)))
+    if topics:
+        queue = deque(search_jobs(topics, licences, args.worker, args.workers, topic_hits))
+    elif categories:
+        queue = deque(category_jobs(categories, args.worker, args.workers))
+    else:
+        queue = deque({'start': lo, 'end': hi, 'continue': {}}
+                      for lo, hi in ranges(args.worker, args.workers))
     done = 0
     resume_seq = 0
     state = read_checkpoint()
@@ -537,13 +742,16 @@ async def run(args):
         print(f'crawl only, worker {args.worker}, {done}/{args.target} already written', flush=True)
         model = preprocess = None
         scorer = None
+        relevance = None
     else:
         print(f'loading SigLIP, worker {args.worker}, {done}/{args.target} already uploaded', flush=True)
         model, _, preprocess = open_clip.create_model_and_transforms('ViT-B-16-SigLIP', pretrained='webli')
         model.eval()
         # The text tower is already loaded, so the safety prompts cost one
         # forward pass at startup and a small matmul per batch thereafter.
-        scorer = safety.Scorer(model, open_clip.get_tokenizer('ViT-B-16-SigLIP'))
+        tokenizer = open_clip.get_tokenizer('ViT-B-16-SigLIP')
+        scorer = safety.Scorer(model, tokenizer)
+        relevance = Relevance(model, tokenizer) if args.relevance > 0 else None
     root = Path('worker-data')
     root.mkdir(exist_ok=True)
     archive = Archive(root, hf, repo)
@@ -629,7 +837,10 @@ async def run(args):
     async with httpx.AsyncClient(headers={'User-Agent': UA}, follow_redirects=True) as client:
         while queue and done < args.target and time.monotonic() - start_time < args.max_seconds:
             job = queue[0]
-            if 'cat' in job:
+            if 'topic' in job:
+                params = params_for_search(job['topic'], job['lic'], job['band'], job['continue'])
+                end = None  # relevance order; there is no title bound to enforce
+            elif 'cat' in job:
                 params = params_for_category(job['cat'], job['start'], job['end'], job['continue'])
                 end = None  # the shard bound is a sortkey, enforced server-side
             else:
@@ -642,12 +853,25 @@ async def run(args):
                 if code in ('maxlag', 'ratelimited'):
                     await asyncio.sleep(30)
                     continue
+                if code == 'cirrussearch-offset-too-large':
+                    # The search API refuses offsets past 10,000. That is the
+                    # shard exhausted, not a failure: licence and width shards
+                    # exist so the clean pool is reachable across several of
+                    # these, and page-id dedupe absorbs any overlap between
+                    # them. Bank what it indexed and take the next shard.
+                    print(f'worker {args.worker}: shard depth reached for '
+                          f'{job.get("topic")!r} / {job.get("lic")!r}', flush=True)
+                    queue.popleft()
+                    save()
+                    continue
                 if code == 'urlparamnormal':
-                    # One unrepresentable cursor should cost a range, not a
+                    # One unrepresentable cursor should cost a job, not a
                     # worker. Drop this job, keep whatever it already indexed,
-                    # and move to the next range.
-                    print(f'worker {args.worker}: dropping range '
-                          f'{job["start"]!r} after {code}', flush=True)
+                    # and move to the next one. Job shape differs by mode
+                    # (ranges have start/end, topic shards have topic/licence).
+                    label = job.get('start', {k: job.get(k) for k in ('topic', 'licence', 'band')})
+                    print(f'worker {args.worker}: dropping job '
+                          f'{label!r} after {code}', flush=True)
                     queue.popleft()
                     save()
                     continue
@@ -665,13 +889,12 @@ async def run(args):
                         COLLECTION, ids=[point_id(r['image_id']) for r in rows],
                         with_payload=False, with_vectors=False)}
                 rows = [r for r in rows if point_id(r['image_id']) not in seen | staged_ids][:args.target - done]
-            loaded = [x for x in await asyncio.gather(*(fetch_image(client, row, limiter, encode_webp=not args.no_archive)
-                                     for row in rows)) if x]
-            failed += len(rows) - len(loaded)
             produced = 0
-            if args.no_embed:
-                for i in range(0, len(loaded), args.batch):
-                    chunk = loaded[i:i + args.batch]
+            fetched = 0
+            async for chunk in batches_as_fetched(client, rows, limiter, args.batch,
+                                                  encode_webp=not args.no_archive):
+                fetched += len(chunk)
+                if args.no_embed:
                     for (row, _, _) in chunk:
                         row.update(build_id=args.build, worker=args.worker)
                     for row, url in zip((r for r, _, _ in chunk), upload_batch(chunk)):
@@ -690,12 +913,12 @@ async def run(args):
                     staged_ids.update(point_id(r['image_id']) for r in kept)
                     done += len(kept)
                     produced += len(kept)
-                loaded = []
-            for i in range(0, len(loaded), args.batch):
-                chunk = loaded[i:i + args.batch]
-                batch = torch.stack([preprocess(im) for _, im, _ in chunk])
-                with torch.inference_mode():
-                    vectors = F.normalize(model.encode_image(batch), dim=-1).float().numpy()
+                    continue
+                # preprocess + forward in a worker thread: torch releases the
+                # GIL, so the event loop keeps draining the sockets for the
+                # batches still in flight. Doing it inline blocks the loop and
+                # the overlap above buys nothing.
+                vectors = await asyncio.to_thread(embed_chunk, model, preprocess, chunk)
                 if not np.isfinite(vectors).all() or vectors.shape[1] != 768:
                     raise RuntimeError('Invalid image embeddings; refusing upload')
                 points = []
@@ -718,8 +941,44 @@ async def run(args):
                 # cached safety prompts is one small matmul. Deferring it would
                 # mean a second pass over a corpus this build does not keep.
                 marks = scorer.payload(vectors) if scorer else [{}] * len(chunk)
-                for (row, _, webp), vec, bm25, mark in zip(
-                        chunk, vectors, sparse_vectors, marks):
+                # The relevance gate. Search order is relevance order, so a
+                # topic's usable depth is wherever its score falls off -- and
+                # that is measured per topic at crawl time, not guessed. Ranged
+                # from ~1,000 usable rows for `coffee` to past 10,000 for
+                # `sunset` on identical hit counts, which is exactly why a
+                # fixed harvest depth cannot work.
+                relevant = np.ones(len(chunk), dtype=bool)
+                if relevance is not None and 'topic' in job:
+                    scores = relevance.score(job['topic'], vectors)
+                    # A RUNNING HIGH-WATER MARK, not the opening batch.
+                    # Calibration killed the opening-batch design: `sunset`
+                    # opens at .0111 and then sits at .07-.09 for the next
+                    # 9,000 ranks -- 7-9x its own first page -- so anchoring to
+                    # page one set the bar far too low, while `autumn forest`
+                    # opens at .2446 and set it far too high. The best batch
+                    # seen so far is what the topic is actually capable of.
+                    batch_median = float(np.median(scores))
+                    job['ref'] = max(job.get('ref') or 0.0, batch_median)
+                    # TWO thresholds, deliberately, because eye review showed
+                    # they are different jobs. The per-image floor exists only
+                    # to drop what is not the topic at all -- a coat of arms
+                    # and an anatomy plate both score 0.0000 against "a photo
+                    # of sunset" -- so it sits low. Cutting per-image at the
+                    # STOP fraction instead put the knife inside a noise band:
+                    # for `coffee` it kept shopfronts and a handful of gravel
+                    # while dropping a cafe interior and a flat-lay with a cup,
+                    # which are the same population either side of the line.
+                    # The shard-level median is what actually tracks decay.
+                    floor = args.relevance * max(job['ref'], 1e-6)
+                    relevant = scores >= floor
+                    if batch_median < args.relevance_stop * max(job['ref'], 1e-6):
+                        job['decayed'] = job.get('decayed', 0) + 1
+                    else:
+                        job['decayed'] = 0
+                for keep, (row, _, webp), vec, bm25, mark in zip(
+                        relevant, chunk, vectors, sparse_vectors, marks):
+                    if not keep:
+                        continue
                     row.update(mark)
                     points.append(models.PointStruct(
                         id=point_id(row['image_id']),
@@ -732,8 +991,42 @@ async def run(args):
                 staged_ids.update(p.id for p in points)
                 done += len(points)
                 produced += len(points)
+            failed += len(rows) - fetched
+            # A page that indexes nothing still costs an API round trip and a
+            # Qdrant existence check. Measured on a finished lane: 2,014 of
+            # 2,555 pages produced zero rows, 38 minutes -- 19% of that lane's
+            # life -- because the shard had already been crawled. They arrive in
+            # runs, since both sortkey and relevance order cluster, so a run of
+            # them means the shard is spent rather than momentarily thin.
+            # Depth cap. Search hands results back best-first, so taking the
+            # top N of a shard IS a quality filter -- and unlike the relevance
+            # gate it costs nothing, because the tail is never fetched rather
+            # than fetched, embedded and then discarded. `coffee` and `sunset`
+            # both hold up for the first few hundred; only `coffee` collapses
+            # after that, and this stops both before it matters.
+            job['kept'] = job.get('kept', 0) + produced
+            if args.shard_depth and job['kept'] >= args.shard_depth:
+                print(f'worker {args.worker}: {job.get("topic", job.get("cat"))!r} '
+                      f'hit its {args.shard_depth}-row cap', flush=True)
+                queue.popleft()
+                save()
+                continue
+            job['barren'] = 0 if produced else job.get('barren', 0) + 1
+            if job['barren'] >= args.barren_patience:
+                print(f'worker {args.worker}: nothing new in {job["barren"]} pages, '
+                      f'dropping shard', flush=True)
+                queue.popleft()
+                save()
+                continue
             queue.popleft()
             continuation = data.get('continue')
+            if job.get('decayed', 0) >= args.relevance_patience:
+                # Spent: this topic has stopped returning itself. Bank the rows
+                # and take the next shard rather than paying for the tail.
+                print(f'worker {args.worker}: {job.get("topic")!r} exhausted at '
+                      f'{job["continue"].get("gsroffset", 0)}', flush=True)
+                save()
+                continue
             if continuation:
                 if continuation == job['continue']:
                     raise RuntimeError('Commons repeated a continuation cursor')
@@ -792,12 +1085,60 @@ if __name__ == '__main__':
     p.add_argument('--workers', type=int, default=4)
     p.add_argument('--target', type=int, required=True)
     p.add_argument('--build', default='commons-v1')
+    p.add_argument('--topics', default='',
+                   help='path to a topic list (one search string per line, # for '
+                        'comments) for a relevance-ordered generator=search '
+                        'harvest, sharded by licence and width band. Takes '
+                        'precedence over --categories.')
+    p.add_argument('--licences', default='',
+                   help='comma-separated Commons licence categories to shard a '
+                        '--topics harvest across. Defaults to the commercially '
+                        'clean set, which keeps share-alike out of a corpus the '
+                        'app hides by default.')
+    p.add_argument('--relevance', type=float, default=0.0,
+                   help='per-image floor, as a fraction of the running best '
+                        'batch median for that shard. 0 disables the gate '
+                        'entirely. Low on purpose: its job is dropping what is '
+                        'not the topic at all, not ranking within it. Relative '
+                        'rather than absolute because the SigLIP score for '
+                        '"clearly relevant" varies by an order of magnitude '
+                        'between prompts -- .0111 for sunset against .2446 for '
+                        'autumn forest, measured.')
+    p.add_argument('--relevance-stop', type=float, default=0.0,
+                   help='a shard is decaying when its batch median falls below '
+                        'this fraction of its running best. This is the number '
+                        'that decides how deep a topic is crawled; measured, '
+                        'it stops `coffee` around rank 3,000 and never stops '
+                        '`sunset`.')
+    p.add_argument('--relevance-patience', type=int, default=3,
+                   help='consecutive pages below the floor before a shard is '
+                        'treated as spent. Three, not two: `autumn forest` dips '
+                        'below its floor at ranks 1500-2000 and recovers to '
+                        '0.89x and 0.93x of reference at 4000 and 7000, so a '
+                        'two-page fuse throws that away.')
     p.add_argument('--categories', default='',
                    help='comma-separated Commons categories for a flat '
                         'generator=categorymembers crawl (the Quality/Featured/'
                         'Valued layer). Empty means the default filename-range '
                         'allimages walk. Sharded by sortkey prefix across workers.')
-    p.add_argument('--batch', type=int, default=16)
+    p.add_argument('--shard-depth', type=int, default=800,
+                   help='stop a (topic, licence, width) shard after this many '
+                        'indexed rows. Replaces the relevance gate as the depth '
+                        'control: search is relevance-ordered, so a cap keeps '
+                        'the good part of every topic without paying to fetch '
+                        'and embed the tail. 800 x 20,848 shards is ~9M '
+                        'addressable; 0 disables the cap.')
+    p.add_argument('--barren-patience', type=int, default=25,
+                   help='consecutive pages indexing nothing before a shard is '
+                        'abandoned. Zero-yield pages are cheap (0.93s measured) '
+                        'but numerous; they were 19%% of one lane\'s wall clock.')
+    # 8, not 16. The embed batch is now also the pipeline's fill unit: nothing
+    # can be embedded until a whole batch has landed, so a big batch idles the
+    # CPU at the start of every page. Simulated at the measured rates (fetch
+    # 5.4 img/s, embed 4.8): batch 32 -> 1.17x, 16 -> 1.44x, 8 -> 1.63x, and
+    # below 8 it flattens. Re-check on a runner; the model here assumes embed
+    # time is linear in batch size, which real torch is not, quite.
+    p.add_argument('--batch', type=int, default=8)
     # Measured on a GitHub runner (4 vCPU, AMD EPYC 7763): 2 threads
     # gave 4.8 img/s through SigLIP and 4 gave 4.2. More threads than
     # the forward pass can use just adds contention.
