@@ -143,18 +143,35 @@ CLEAN_LICENCES = ['CC-Zero', 'CC-BY-4.0', 'CC-BY-2.0', 'CC-BY-3.0',
                   'CC-PD-Mark', 'PD-old-100-expired', 'PD-self', 'PD-1996']
 
 
-def job_weight(topic, licences, hits):
+# Measured, and they matter here only because they decide where the depth cap
+# starts to bite: 42% of a relevance harvest's files carry a clean licence
+# (1,400-file sample), and 91.8% of those pass the dims/aspect filter.
+CLEAN_SHARE = 0.42
+FILTER_KEEP = 0.918
+
+
+def job_weight(topic, licences, hits, depth=1600):
     """Rows a (topic, licence, band) shard is expected to yield.
 
-    Only relative size matters, so the clean-licence fraction cancels out. The
-    10,000 cap does not: it is where the search API stops paginating, and a
-    200,000-hit topic is not twenty times the work of a 10,000-hit one.
+    A shard stops at `depth` new rows, so no shard is ever more work than that,
+    whatever its hit count says. The first version capped at the search API's
+    10,000-row pagination wall instead. That made every big topic look about six
+    times heavier than the crawler would ever let it be, while thin topics were
+    overestimated by under three. The packer read "these lanes are already full",
+    handed them fewer jobs, and they finished early -- the exact imbalance this
+    function exists to prevent.
+
+    The clean-share and filter factors no longer cancel out, because they set
+    the topic size at which the cap starts to bite. depth=0 disables the cap,
+    leaving only the pagination wall.
     """
     shards = max(1, len(licences) * len(WIDTH_BANDS))
-    return min(10000.0, max(hits.get(topic, 0), 0) / shards) or 1.0
+    ceiling = float(depth) if depth else 10000.0
+    expected = max(hits.get(topic, 0), 0) * CLEAN_SHARE * FILTER_KEEP / shards
+    return min(ceiling, expected) or 1.0
 
 
-def search_jobs(topics, licences, worker, workers, hits=None):
+def search_jobs(topics, licences, worker, workers, hits=None, depth=1600):
     """One job per (topic, licence, width band), balanced across workers.
 
     Search order is relevance order, so a partial job keeps the BEST of its
@@ -185,14 +202,14 @@ def search_jobs(topics, licences, worker, workers, hits=None):
     # Deterministic order, so every worker packs the bins identically without
     # talking to any other worker.
     ordered = sorted(all_jobs,
-                     key=lambda j: (-job_weight(j['topic'], licences, hits),
+                     key=lambda j: (-job_weight(j['topic'], licences, hits, depth),
                                     j['topic'], j['lic'], j['band']))
     load = [0.0] * workers
     bins = [[] for _ in range(workers)]
     for job in ordered:
         light = min(range(workers), key=lambda i: (load[i], i))
         bins[light].append(job)
-        load[light] += job_weight(job['topic'], licences, hits)
+        load[light] += job_weight(job['topic'], licences, hits, depth)
     return bins[worker]
 
 
@@ -705,7 +722,8 @@ async def run(args):
         except EntryNotFoundError:
             return None
     if topics:
-        queue = deque(search_jobs(topics, licences, args.worker, args.workers, topic_hits))
+        queue = deque(search_jobs(topics, licences, args.worker, args.workers, topic_hits,
+                                  args.shard_depth))
     elif categories:
         queue = deque(category_jobs(categories, args.worker, args.workers))
     else:
@@ -1121,13 +1139,16 @@ if __name__ == '__main__':
                         'generator=categorymembers crawl (the Quality/Featured/'
                         'Valued layer). Empty means the default filename-range '
                         'allimages walk. Sharded by sortkey prefix across workers.')
-    p.add_argument('--shard-depth', type=int, default=800,
+    p.add_argument('--shard-depth', type=int, default=1600,
                    help='stop a (topic, licence, width) shard after this many '
                         'indexed rows. Replaces the relevance gate as the depth '
                         'control: search is relevance-ordered, so a cap keeps '
                         'the good part of every topic without paying to fetch '
-                        'and embed the tail. 800 x 20,848 shards is ~9M '
-                        'addressable; 0 disables the cap.')
+                        'and embed the tail. 1600, not 800: measured per shard '
+                        'across 40 topics in 8 hit-count strata, 800 held a '
+                        'clean-only build to ~8.0M -- capped, not short of '
+                        'supply, with ~193M clean in the list -- and 1600 '
+                        'reaches ~11.9M. 0 disables the cap.')
     p.add_argument('--barren-patience', type=int, default=25,
                    help='consecutive pages indexing nothing before a shard is '
                         'abandoned. Zero-yield pages are cheap (0.93s measured) '
