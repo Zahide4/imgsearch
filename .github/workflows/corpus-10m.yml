@@ -1,4 +1,5 @@
 name: 10M corpus (standalone, no storage)
+run-name: "${{ inputs.build }} - restart ${{ inputs.resume_count }}"
 
 # The 10M build. Each runner crawls Commons, embeds with SigLIP on its own
 # CPU, scores for safety, and upserts straight to Qdrant. Nothing is parked
@@ -81,6 +82,19 @@ on:
           every remaining worker.
         default: ''
         required: false
+      resume_count:
+        description: >-
+          How many times this build has restarted itself. Leave 0 when
+          starting a build; the resume job sets it on every restart.
+        default: '0'
+        required: false
+      max_resumes:
+        description: >-
+          Most restarts this build may give itself before stopping for a
+          person. 8 restarts of a 4.5 h window is ~40 h, well past a full 10M
+          build; the cap only exists so a bug cannot loop forever.
+        default: '8'
+        required: false
 
 permissions:
   contents: read
@@ -160,6 +174,7 @@ jobs:
             sentencepiece protobuf transformers huggingface_hub \
             qdrant-client fastembed
       - name: Crawl, embed, score and index
+        id: crawl
         env:
           TARGET: ${{ inputs.target_per_worker }}
           BUILD: ${{ inputs.build }}
@@ -183,7 +198,78 @@ jobs:
           # multi-run build -- treat it as a note so a red job always means
           # something actually broke.
           if [ "$code" = "75" ]; then
-            echo "::notice title=Resume needed::Worker $WORKER saved its cursor; rerun this build to continue"
+            echo "::notice title=Resume needed::Worker $WORKER stopped with shards still queued; this build restarts itself"
+            # The resume job below counts these flags to decide whether to restart.
+            echo "$WORKER" > resume-flag.txt
+            echo "resume=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           exit "$code"
+      - name: Flag this worker as having work left
+        if: steps.crawl.outputs.resume == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: resume-${{ matrix.worker }}
+          path: resume-flag.txt
+          retention-days: 1
+
+  # Restarts this build whenever any worker stopped with shards still queued,
+  # with no person and no agent in the loop. GitHub lets a workflow_dispatch run
+  # start the next one with its own token, so restarts cost nobody's usage and
+  # happen overnight. Each repo's half restarts itself; both resume from the same
+  # checkpoints, so they do not need to restart in step.
+  #
+  # Stops when no worker has work left, when max_resumes is reached, when a
+  # person cancels the run (cancelled() is then true, so this job is skipped),
+  # or when the repo variable CRAWL_AUTORESUME is set to "off".
+  #
+  # A worker that CRASHED raises no flag, deliberately: a crash that repeats
+  # would otherwise relaunch the build up to the cap. It is still restarted with
+  # everyone else whenever any other worker has work left, and resumes from its
+  # last saved cursor; only if a crash is the last unfinished work does the
+  # build stop and wait for a person.
+  resume:
+    needs: build
+    if: ${{ !cancelled() && vars.CRAWL_AUTORESUME != 'off' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Restart if any worker has work left
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          REF: ${{ github.ref_name }}
+          COUNT: ${{ inputs.resume_count }}
+          MAX: ${{ inputs.max_resumes }}
+          BUILD: ${{ inputs.build }}
+          TARGET: ${{ inputs.target_per_worker }}
+          CATEGORIES: ${{ inputs.categories }}
+          TOPICS: ${{ inputs.topics }}
+          MAX_SECONDS: ${{ inputs.max_seconds }}
+          WORKERS: ${{ inputs.workers }}
+          FIRST: ${{ inputs.first_worker }}
+          LANES: ${{ inputs.lanes }}
+        run: |
+          left=$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts?per_page=100" \
+                 --jq '[.artifacts[].name | select(startswith("resume-"))] | length')
+          count=${COUNT:-0}
+          max=${MAX:-8}
+          echo "workers with work left: $left | restarts so far: $count of $max"
+          if [ "$left" -eq 0 ]; then
+            echo "::notice title=Build finished::no worker in this run has work left"
+            exit 0
+          fi
+          if [ "$count" -ge "$max" ]; then
+            echo "::warning title=Restart cap reached::$left workers still have work after $count restarts; rerun this build by hand to continue"
+            exit 0
+          fi
+          next=$((count + 1))
+          gh workflow run corpus-10m.yml --repo "$REPO" --ref "$REF" \
+            -f build="$BUILD" -f target_per_worker="$TARGET" \
+            -f categories="$CATEGORIES" -f topics="$TOPICS" \
+            -f max_seconds="$MAX_SECONDS" -f workers="$WORKERS" \
+            -f first_worker="$FIRST" -f lanes="$LANES" \
+            -f resume_count="$next" -f max_resumes="$max"
+          echo "::notice title=Restarted::dispatched restart $next of $max"

@@ -572,3 +572,19 @@ class SearchHarvestTest(unittest.TestCase):
         self.assertTrue(cloud_corpus.CLEAN_LICENCES)
         for lic in cloud_corpus.CLEAN_LICENCES:
             self.assertNotIn('SA', lic.upper().replace('-', ''))
+
+class ResumeSignalTest(unittest.TestCase):
+    """The workflow restarts a build when a worker exits 75, so 75 must mean
+    "out of time with jobs still queued" and nothing else."""
+
+    def test_out_of_time_with_jobs_left_asks_for_a_restart(self):
+        self.assertEqual(cloud_corpus.exit_code(10, 100, [{'topic': 'x'}]), 75)
+
+    def test_empty_queue_is_finished_even_below_target(self):
+        # A worker whose whole bin is spent is done, not paused. Exiting 75 here
+        # would make a self-restarting build relaunch finished workers until its
+        # restart cap ran out.
+        self.assertEqual(cloud_corpus.exit_code(10, 100, []), 0)
+
+    def test_reaching_target_is_finished(self):
+        self.assertEqual(cloud_corpus.exit_code(100, 100, [{'topic': 'x'}]), 0)
