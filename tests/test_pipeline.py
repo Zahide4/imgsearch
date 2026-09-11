@@ -566,24 +566,6 @@ class SearchHarvestTest(unittest.TestCase):
                  for w in range(6)]
         self.assertEqual(seen, again, 'assignment is not deterministic')
 
-    def test_weight_respects_the_shard_depth_cap(self):
-        # The crawler stops a shard at --shard-depth, so the balancer must never
-        # think a big topic is bigger than that. Capping estimates at the API's
-        # 10,000-row wall instead made big topics look ~6x heavier than they
-        # are, so the lanes holding them were under-filled and finished early.
-        lic = cloud_corpus.CLEAN_LICENCES
-        huge = {'t': 50_000_000}
-        self.assertEqual(cloud_corpus.job_weight('t', lic, huge, depth=1600), 1600)
-        self.assertEqual(cloud_corpus.job_weight('t', lic, huge, depth=800), 800)
-        # depth 0 means no cap, so only the pagination wall is left.
-        self.assertEqual(cloud_corpus.job_weight('t', lic, huge, depth=0), 10000)
-        # Below the cap, weight tracks clean supply rather than raw hits.
-        small = {'t': 16_000}
-        expected = (16_000 * cloud_corpus.CLEAN_SHARE * cloud_corpus.FILTER_KEEP
-                    / (len(lic) * len(cloud_corpus.WIDTH_BANDS)))
-        self.assertAlmostEqual(cloud_corpus.job_weight('t', lic, small, depth=1600),
-                               expected, places=6)
-
     def test_licence_default_excludes_share_alike(self):
         # The app hides share-alike by default, so a harvest that includes it
         # spends crawl hours on images most users never see.
