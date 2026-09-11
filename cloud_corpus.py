@@ -454,9 +454,11 @@ def metadata(page, end=None):
 # Commons sometimes answers 200 with an error body instead of an HTTP error,
 # so request()'s 429/5xx retry never sees it. internal_api_error_* means a
 # backend hiccup -- internal_api_error_DBConnectionError killed worker 37 of
-# build 10m-0911 2.5h into its window. Worth a wait and a retry, not a dead
-# worker. Bounded: past COMMONS_MAX_BLIPS straight blips the error stands, so
-# a truly broken query still dies loudly instead of burning its whole window.
+# build 10m-0911 2.5h into its window, and cirrussearch-too-busy-error (the
+# search backend overloaded) killed worker 47 in restart 1. Worth a wait and
+# a retry, not a dead worker. Bounded: past COMMONS_MAX_BLIPS straight blips
+# the error stands, so a truly broken query still dies loudly instead of
+# burning its whole window.
 COMMONS_MAX_BLIPS = 10
 
 
@@ -464,7 +466,8 @@ def transient_commons_error(code):
     """True when a Commons error-JSON code is a backend blip worth retrying."""
     if not code:
         return False
-    if code in ('maxlag', 'ratelimited', 'readonly'):
+    if code in ('maxlag', 'ratelimited', 'readonly',
+                'cirrussearch-too-busy-error'):
         return True
     return code.startswith('internal_api_error')
 

@@ -667,6 +667,8 @@ class CommonsBlipTest(unittest.TestCase):
             'internal_api_error_DBConnectionError'))
         self.assertTrue(cloud_corpus.transient_commons_error(
             'internal_api_error_DBQueryError'))
+        self.assertTrue(cloud_corpus.transient_commons_error(
+            'cirrussearch-too-busy-error'))
         self.assertFalse(cloud_corpus.transient_commons_error(None))
         self.assertFalse(cloud_corpus.transient_commons_error(''))
         self.assertFalse(cloud_corpus.transient_commons_error('urlparamnormal'))
