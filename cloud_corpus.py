@@ -1030,6 +1030,10 @@ async def run(args):
                     print(f'worker {args.worker}: queue progress failed: '
                           f'{type(exc).__name__}', flush=True)
             reported = done
+            # The corpus-wide cap still has to be checked mid-run: without
+            # this a queue-mode worker never sees stop_at_total after launch.
+            if qc is not None and args.stop_at_total:
+                goal['reached'] = goal_met(collection_size(qc), args.stop_at_total)
             return
         state = json.dumps({'queue': list(queue), 'uploaded': done, 'done': done,
                             'manifest_seq': manifest_seq, 'pages': pages}).encode()
