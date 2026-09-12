@@ -34,7 +34,14 @@ class QueueClient:
         if r.status_code == 204:
             return None
         r.raise_for_status()
-        return r.json()
+        data = r.json()
+        # The service wraps the unit; workers think in units. `continue` is
+        # the shared name for a resume cursor (Commons offsets, Openverse page).
+        unit = dict(data.get('unit') or {})
+        unit['id'] = data.get('id')
+        unit['continue'] = data.get('cursor') or {}
+        unit['attempts'] = data.get('attempts')
+        return unit
 
     def progress(self, job_id: int, cursor: dict | None, produced: int) -> bool:
         r = self._post('/progress', {'id': job_id, 'worker': self.worker,
@@ -58,7 +65,14 @@ class QueueClient:
     def stats(self) -> dict:
         r = self.http.get(f'{self.url}/stats', params={'build': self.build})
         r.raise_for_status()
-        return r.json()
+        data = r.json()
+        # The service wraps the unit; workers think in units. `continue` is
+        # the shared name for a resume cursor (Commons offsets, Openverse page).
+        unit = dict(data.get('unit') or {})
+        unit['id'] = data.get('id')
+        unit['continue'] = data.get('cursor') or {}
+        unit['attempts'] = data.get('attempts')
+        return unit
 
     def close(self) -> None:
         self.http.close()
