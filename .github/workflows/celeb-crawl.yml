@@ -21,6 +21,10 @@ on:
         description: Wall clock per job, under the 6 h runner ceiling
         default: '16200'
         required: true
+      stop_at_total:
+        description: Stop every worker once the whole collection holds this many points (0 disables)
+        default: '0'
+        required: false
       workers:
         description: TOTAL workers across every repo taking part
         default: '60'
@@ -95,6 +99,7 @@ jobs:
         env:
           BUILD: ${{ inputs.build }}
           MAX_SECONDS: ${{ inputs.max_seconds }}
+          STOP_AT_TOTAL: ${{ inputs.stop_at_total }}
           WORKER: ${{ matrix.worker }}
           WORKERS: ${{ inputs.workers }}
           # Flush often: every flush is also a lease renewal and a resume
@@ -113,13 +118,15 @@ jobs:
         run: |
           [[ "$WORKERS" =~ ^[0-9]+$ ]] || { echo "::error::workers must be numeric"; exit 1; }
           [[ "$MAX_SECONDS" =~ ^[0-9]+$ ]] || { echo "::error::max_seconds must be numeric"; exit 1; }
+          [[ "$STOP_AT_TOTAL" =~ ^[0-9]+$ ]] || { echo "::error::stop_at_total must be numeric"; exit 1; }
           [ -n "$CRAWL_QUEUE_URL" ] || { echo "::error title=Missing queue::set the CRAWL_QUEUE_URL secret"; exit 1; }
           set +e
           python cloud_corpus.py --no-archive \
             --queue-url "$CRAWL_QUEUE_URL" --queue-build "$BUILD" \
             --queue-worker "${GITHUB_RUN_ID}-${WORKER}" \
             --worker "$WORKER" --workers "$WORKERS" --build "$BUILD" \
-            --threads 2 --max-seconds "$MAX_SECONDS"
+            --threads 2 --max-seconds "$MAX_SECONDS" \
+            --stop-at-total "$STOP_AT_TOTAL"
           code=$?
           set -e
           if [ "$code" = "75" ]; then
@@ -169,6 +176,7 @@ jobs:
           MAX: ${{ inputs.max_resumes }}
           BUILD: ${{ inputs.build }}
           MAX_SECONDS: ${{ inputs.max_seconds }}
+          STOP_AT_TOTAL: ${{ inputs.stop_at_total }}
           WORKERS: ${{ inputs.workers }}
           FIRST: ${{ inputs.first_worker }}
           LANES: ${{ inputs.lanes }}
@@ -191,6 +199,7 @@ jobs:
           next=$((count + 1))
           gh workflow run celeb-crawl.yml --repo "$REPO" --ref "$REF" \
             -f build="$BUILD" -f max_seconds="$MAX_SECONDS" \
+            -f stop_at_total="$STOP_AT_TOTAL" \
             -f workers="$WORKERS" -f first_worker="$FIRST" -f lanes="$LANES" \
             -f resume_count="$next" -f max_resumes="$max"
           echo "::notice title=Restarted::dispatched restart $next of $max"
