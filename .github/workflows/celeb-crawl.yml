@@ -1,0 +1,192 @@
+name: Celebrity corpus (queue)
+
+# The modern-figures build. Same runners, same embedding pipeline, same
+# self-restart loop as the 10M crawl -- one difference: workers pull small
+# units from the crawl queue (one Openverse query per person, one Commons
+# licence/width shard per person) instead of owning a static bin. A finished
+# or dead worker's units go straight back to the pool, so all lanes drain
+# together and nothing waits days on a handful of workers.
+#
+# Two-account split: dispatch this with the same build/workers on both repos
+# and a non-overlapping first_worker/lanes slice, as with the 10M build.
+
+on:
+  workflow_dispatch:
+    inputs:
+      build:
+        description: Build identifier; reuse the same value to resume
+        default: celeb-v1
+        required: true
+      max_seconds:
+        description: Wall clock per job, under the 6 h runner ceiling
+        default: '16200'
+        required: true
+      workers:
+        description: TOTAL workers across every repo taking part
+        default: '60'
+        required: true
+      first_worker:
+        description: First worker index this repo runs (0 for a single repo)
+        default: '0'
+        required: false
+      lanes:
+        description: How many workers, from first_worker on, this repo runs
+        default: ''
+        required: false
+      resume_count:
+        description: Restarts so far; set by the resume job
+        default: '0'
+        required: false
+      max_resumes:
+        description: Restart cap before a person has to look
+        default: '8'
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: celeb-crawl
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+    steps:
+      - id: gen
+        env:
+          TOTAL: ${{ inputs.workers }}
+          FIRST: ${{ inputs.first_worker }}
+          LANES: ${{ inputs.lanes }}
+        run: |
+          python3 - >> "$GITHUB_OUTPUT" <<'PY'
+          import json, os
+          total = int(os.environ['TOTAL'])
+          first = int(os.environ.get('FIRST') or 0)
+          lanes = int(os.environ.get('LANES') or total - first)
+          if total < 1 or not 0 <= first < total or lanes < 1:
+              raise SystemExit(f'bad slice: first_worker={first} lanes={lanes} workers={total}')
+          print('matrix=' + json.dumps(list(range(first, min(first + lanes, total)))))
+          PY
+
+  build:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        worker: ${{ fromJson(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.11'
+      - name: Install CPU embedding runtime
+        run: |
+          pip install -q torch==2.14.0 torchvision==0.29.0 --index-url https://download.pytorch.org/whl/cpu
+          pip install -q open_clip_torch==3.3.0 httpx==0.28.1 Pillow==12.3.0 numpy==2.5.3 \
+            sentencepiece==0.2.2 protobuf==7.36.1 transformers==5.17.0 huggingface_hub==1.31.0 \
+            qdrant-client==1.19.0
+      - name: Crawl, embed and index from the queue
+        id: crawl
+        env:
+          BUILD: ${{ inputs.build }}
+          MAX_SECONDS: ${{ inputs.max_seconds }}
+          WORKER: ${{ matrix.worker }}
+          WORKERS: ${{ inputs.workers }}
+          QDRANT_COLLECTION: ${{ vars.QDRANT_COLLECTION || 'images-v2' }}
+          # Secrets only exist in this step; the install above runs clean.
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          QDRANT_URL: ${{ secrets.QDRANT_URL }}
+          QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+          CRAWL_QUEUE_URL: ${{ secrets.CRAWL_QUEUE_URL }}
+          FRAMEDROP_APP_KEY: ${{ secrets.FRAMEDROP_APP_KEY }}
+          OPENVERSE_CLIENT_ID: ${{ secrets.OPENVERSE_CLIENT_ID }}
+          OPENVERSE_CLIENT_SECRET: ${{ secrets.OPENVERSE_CLIENT_SECRET }}
+        run: |
+          [[ "$WORKERS" =~ ^[0-9]+$ ]] || { echo "::error::workers must be numeric"; exit 1; }
+          [[ "$MAX_SECONDS" =~ ^[0-9]+$ ]] || { echo "::error::max_seconds must be numeric"; exit 1; }
+          [ -n "$CRAWL_QUEUE_URL" ] || { echo "::error title=Missing queue::set the CRAWL_QUEUE_URL secret"; exit 1; }
+          set +e
+          python cloud_corpus.py --no-archive \
+            --queue-url "$CRAWL_QUEUE_URL" --queue-build "$BUILD" \
+            --queue-worker "${GITHUB_RUN_ID}-${WORKER}" \
+            --worker "$WORKER" --workers "$WORKERS" --build "$BUILD" \
+            --threads 2 --max-seconds "$MAX_SECONDS"
+          code=$?
+          set -e
+          if [ "$code" = "75" ]; then
+            echo "::notice title=Resume needed::worker $WORKER stopped with the clock still running; the queue keeps the cursor"
+            echo "resume=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          exit "$code"
+      - name: Flag work left
+        if: steps.crawl.outputs.resume == 'true'
+        run: echo "$WORKER" > resume-flag.txt
+      - name: Upload resume flag
+        if: steps.crawl.outputs.resume == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: resume-${{ matrix.worker }}
+          path: resume-flag.txt
+          retention-days: 1
+      # A crash raises no resume flag -- the worker never got to write one.
+      # This flag exists so the resume job restarts the build for crashes too:
+      # the crashed worker's unit is reissued when its lease expires.
+      - name: Flag a crash
+        if: failure()
+        run: echo "$WORKER" > crashed-flag.txt
+      - name: Upload crash flag
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: crashed-${{ matrix.worker }}
+          path: crashed-flag.txt
+          retention-days: 1
+
+  resume:
+    needs: build
+    if: ${{ !cancelled() && vars.CRAWL_AUTORESUME != 'off' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Restart if any worker has work left or crashed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          REF: ${{ github.ref_name }}
+          COUNT: ${{ inputs.resume_count }}
+          MAX: ${{ inputs.max_resumes }}
+          BUILD: ${{ inputs.build }}
+          MAX_SECONDS: ${{ inputs.max_seconds }}
+          WORKERS: ${{ inputs.workers }}
+          FIRST: ${{ inputs.first_worker }}
+          LANES: ${{ inputs.lanes }}
+        run: |
+          left=$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts?per_page=100" \
+                 --jq '[.artifacts[].name | select(startswith("resume-"))] | length')
+          crashed=$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts?per_page=100" \
+                 --jq '[.artifacts[].name | select(startswith("crashed-"))] | length')
+          count=${COUNT:-0}
+          max=${MAX:-8}
+          echo "resume flags: $left | crash flags: $crashed | restarts: $count of $max"
+          if [ "$left" -eq 0 ] && [ "$crashed" -eq 0 ]; then
+            echo "::notice title=Build finished::no worker has work left and none crashed"
+            exit 0
+          fi
+          if [ "$count" -ge "$max" ]; then
+            echo "::warning title=Restart cap reached::$left workers had work left, $crashed crashed; rerun by hand to continue"
+            exit 0
+          fi
+          next=$((count + 1))
+          gh workflow run celeb-crawl.yml --repo "$REPO" --ref "$REF" \
+            -f build="$BUILD" -f max_seconds="$MAX_SECONDS" \
+            -f workers="$WORKERS" -f first_worker="$FIRST" -f lanes="$LANES" \
+            -f resume_count="$next" -f max_resumes="$max"
+          echo "::notice title=Restarted::dispatched restart $next of $max"
