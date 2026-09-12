@@ -97,6 +97,10 @@ jobs:
           MAX_SECONDS: ${{ inputs.max_seconds }}
           WORKER: ${{ matrix.worker }}
           WORKERS: ${{ inputs.workers }}
+          # Flush often: every flush is also a lease renewal and a resume
+          # cursor, and celeb units are small enough that 4000 rows would
+          # arrive long after the 20-minute lease.
+          FLUSH_EVERY: '500'
           QDRANT_COLLECTION: ${{ vars.QDRANT_COLLECTION || 'images-v2' }}
           # Secrets only exist in this step; the install above runs clean.
           HF_TOKEN: ${{ secrets.HF_TOKEN }}

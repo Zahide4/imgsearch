@@ -65,14 +65,7 @@ class QueueClient:
     def stats(self) -> dict:
         r = self.http.get(f'{self.url}/stats', params={'build': self.build})
         r.raise_for_status()
-        data = r.json()
-        # The service wraps the unit; workers think in units. `continue` is
-        # the shared name for a resume cursor (Commons offsets, Openverse page).
-        unit = dict(data.get('unit') or {})
-        unit['id'] = data.get('id')
-        unit['continue'] = data.get('cursor') or {}
-        unit['attempts'] = data.get('attempts')
-        return unit
+        return r.json()
 
     def close(self) -> None:
         self.http.close()
