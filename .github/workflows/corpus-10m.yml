@@ -165,7 +165,7 @@ jobs:
           # fastembed is not optional: sparse.py builds the BM25 half of
           # hybrid retrieval client-side, because a self-hosted Qdrant has no
           # inference service to do it.
-          pip install -q open_clip_torch==3.3.0 httpx==0.28.1 Pillow==12.3.0 numpy==2.5.3 \
+          pip install -q open_clip_torch==3.3.0 httpx==0.28.1 Pillow==12.3.0 numpy==2.4.6 \
             sentencepiece==0.2.2 protobuf==7.36.1 transformers==5.17.0 huggingface_hub==1.31.0 \
             qdrant-client==1.19.0 fastembed==0.8.0
       - name: Crawl, embed, score and index
