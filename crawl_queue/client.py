@@ -7,6 +7,8 @@ to whoever is still running.
 """
 from __future__ import annotations
 
+import os
+
 import httpx
 
 
@@ -17,8 +19,11 @@ class QueueClient:
         self.build = build
         self.worker = worker
         self.lease = lease
-        self.http = httpx.Client(timeout=timeout,
-                                 headers={'User-Agent': 'FrameDropCrawl/1'})
+        headers = {'User-Agent': 'FrameDropCrawl/1'}
+        app_key = os.environ.get('FRAMEDROP_APP_KEY')
+        if app_key:
+            headers['X-FrameDrop-Key'] = app_key
+        self.http = httpx.Client(timeout=timeout, headers=headers)
 
     def _post(self, path: str, payload: dict) -> httpx.Response:
         return self.http.post(f'{self.url}{path}', json=payload)
