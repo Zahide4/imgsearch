@@ -748,3 +748,48 @@ class CommonsBlipTest(unittest.TestCase):
     def test_drop_label_prefers_start_for_range_shards(self):
         job = {'start': 'A', 'end': 'B', 'continue': {}}
         self.assertEqual(cloud_corpus.drop_label(job), 'A')
+
+
+class SafeExtractTests(unittest.TestCase):
+    """cloud_sync's shard extraction must never write outside the thumbs dir."""
+
+    @staticmethod
+    def _tar_bytes(name, *, type_=None, linkname=''):
+        import io
+        import tarfile
+        payload = b'webp'
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode='w') as tar:
+            info = tarfile.TarInfo(name)
+            info.size = len(payload)
+            if type_ is not None:
+                info.type = type_
+                info.linkname = linkname
+                info.size = 0
+            tar.addfile(info, io.BytesIO(payload))
+        buffer.seek(0)
+        return buffer
+
+    def test_rejects_escaping_and_link_members(self):
+        import tarfile
+        import tempfile
+        from cloud_sync import safe_extract
+        cases = [('../escape.webp', None, ''),
+                 ('/abs/escape.webp', None, ''),
+                 ('link.webp', tarfile.SYMTYPE, '/etc/passwd'),
+                 ('hard.webp', tarfile.LNKTYPE, 'target.webp')]
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, type_, linkname in cases:
+                with tarfile.open(fileobj=self._tar_bytes(name, type_=type_,
+                                                          linkname=linkname)) as tar:
+                    with self.assertRaises(ValueError, msg=name):
+                        safe_extract(tar, Path(tmp))
+
+    def test_accepts_regular_file(self):
+        import tarfile
+        import tempfile
+        from cloud_sync import safe_extract
+        with tempfile.TemporaryDirectory() as tmp:
+            with tarfile.open(fileobj=self._tar_bytes('fine.webp')) as tar:
+                safe_extract(tar, Path(tmp))
+            self.assertTrue((Path(tmp) / 'fine.webp').exists())

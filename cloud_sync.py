@@ -33,6 +33,26 @@ DATA = ROOT / "data"
 THUMBS = DATA / "thumbs"
 DB_PATH = DATA / "index.db"
 
+
+def safe_extract(tar: tarfile.TarFile, dest: Path) -> None:
+    """Extract a shard archive without letting a member escape dest.
+
+    Shards come from our own dataset repo, but a tampered or malformed
+    archive must not be able to write through absolute paths, `..` or
+    links. Only regular files are accepted; directories are created by
+    extraction itself.
+    """
+    root = os.path.realpath(dest)
+    for member in tar.getmembers():
+        if member.isdir():
+            continue
+        if not member.isfile():
+            raise ValueError(f"refusing archive member {member.name!r}: not a regular file")
+        target = os.path.realpath(os.path.join(root, member.name))
+        if not target.startswith(root + os.sep):
+            raise ValueError(f"refusing archive member outside {dest}: {member.name!r}")
+    tar.extractall(root)
+
 REPO = os.environ.get("HF_REPO", "")
 TOKEN = os.environ.get("HF_TOKEN", "")
 
@@ -123,7 +143,7 @@ def pull():
     for t in tars:
         p = hf_hub_download(REPO, t, repo_type="dataset", token=TOKEN)
         with tarfile.open(p) as tar:
-            tar.extractall(THUMBS)
+            safe_extract(tar, THUMBS)
         print(f"  extracted {t}")
 
     con.close()
