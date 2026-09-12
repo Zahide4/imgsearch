@@ -451,6 +451,100 @@ def metadata(page, end=None):
     }
 
 
+# Openverse (WordPress's CC search) is the second source. It covers CC
+# images Commons does not, but its rate limits are per-token: the anonymous
+# tier is a trickle, so the workflow passes OPENVERSE_CLIENT_ID/SECRET and
+# the worker trades them for a 24h bearer at startup.
+OPENVERSE_API = 'https://api.openverse.org/v1'
+_ov_token = {'value': None, 'expires': 0.0}
+
+
+def openverse_token():
+    if os.environ.get('OPENVERSE_TOKEN'):
+        return os.environ['OPENVERSE_TOKEN']
+    cid = os.environ.get('OPENVERSE_CLIENT_ID')
+    secret = os.environ.get('OPENVERSE_CLIENT_SECRET')
+    if not cid or not secret:
+        return None
+    if _ov_token['value'] and time.time() < _ov_token['expires'] - 60:
+        return _ov_token['value']
+    r = httpx.post(f'{OPENVERSE_API}/auth_tokens/token/', timeout=30,
+                   data={'client_id': cid, 'client_secret': secret,
+                         'grant_type': 'client_credentials'})
+    r.raise_for_status()
+    body = r.json()
+    _ov_token.update(value=body['access_token'],
+                     expires=time.time() + int(body.get('expires_in') or 86400))
+    return _ov_token['value']
+
+
+async def openverse_page(client, name, page):
+    """One page of clean-licensed results for a person, or None when spent.
+
+    The license filter is repeated server-side (cc0,pdm,by) so share-alike,
+    non-commercial and no-derivatives results never even arrive.
+    """
+    params = {'q': name, 'license': 'cc0,pdm,by', 'page_size': 20, 'page': page}
+    token = openverse_token()
+    headers = {'Authorization': f'Bearer {token}'} if token else {}
+    for attempt in range(4):
+        try:
+            r = await client.get(f'{OPENVERSE_API}/images/', params=params,
+                                 headers=headers, timeout=60)
+        except (httpx.TimeoutException, httpx.TransportError):
+            await asyncio.sleep(2 ** attempt)
+            continue
+        if r.status_code == 401 and token:
+            _ov_token.update(value=None, expires=0.0)
+            token = openverse_token()
+            headers = {'Authorization': f'Bearer {token}'} if token else {}
+            continue
+        if r.status_code == 429:
+            await asyncio.sleep(60)
+            continue
+        if r.status_code >= 500 or r.status_code == 404:
+            if r.status_code == 404:
+                return None
+            await asyncio.sleep(2 ** attempt)
+            continue
+        r.raise_for_status()
+        return r.json()
+    return None
+
+
+def openverse_metadata(item, name):
+    """Openverse result -> the corpus row shape. Clean licences only."""
+    lic = (item.get('license') or '').lower()
+    version = item.get('license_version') or ''
+    if lic == 'cc0':
+        license_name, license_class = 'CC0 1.0', 'public_domain'
+    elif lic == 'pdm':
+        license_name, license_class = 'Public Domain Mark 1.0', 'public_domain'
+    elif lic == 'by':
+        license_name, license_class = f'CC BY {version}'.strip(), 'attribution'
+    else:
+        return None  # a second gate behind the API's own licence filter
+    url = item.get('url') or ''
+    thumb = item.get('thumbnail') or url
+    if not url:
+        return None
+    w, h = int(item.get('width') or 0), int(item.get('height') or 0)
+    if w and h and (min(w, h) < 320 or max(w, h) / min(w, h) > 8):
+        return None
+    return {
+        'image_id': f"openverse:{item.get('id')}",
+        'title': clean_text(item.get('title') or '')[:300],
+        'creator': clean_text(item.get('creator') or '')[:180],
+        'license': license_name, 'license_class': license_class,
+        'license_url': item.get('license_url') or '',
+        'source_url': item.get('foreign_landing_url') or '',
+        'full_url': url, 'thumb': thumb, 'thumb_origin': thumb,
+        'width': w, 'height': h, 'mime': '', 'sha1': '',
+        'description': '', 'tags': '',
+        'celeb': name,
+    }
+
+
 # Commons sometimes answers 200 with an error body instead of an HTTP error,
 # so request()'s 429/5xx retry never sees it. internal_api_error_* means a
 # backend hiccup -- internal_api_error_DBConnectionError killed worker 37 of
@@ -753,6 +847,19 @@ async def run(args):
             topic_hits = {k: int(v) for k, v in json.loads(sidecar.read_text()).items()}
             print(f'worker {args.worker}: balancing lanes from {len(topic_hits)} '
                   f'measured topic sizes', flush=True)
+    # Queue mode: the statically derived lane disappears. Work is claimed one
+    # small unit at a time, leases requeue what a dead worker held, and the
+    # queue is drained rather than a worker's own bin.
+    queue_client = None
+    if args.queue_url:
+        from crawl_queue.client import QueueClient
+        queue_client = QueueClient(args.queue_url, args.queue_build or args.build,
+                                   args.queue_worker or f'{args.build}-{args.worker}',
+                                   args.queue_lease)
+        if args.target <= 0:
+            args.target = 1 << 62
+        print(f'worker {args.worker}: queue mode, {queue_client.worker} on '
+              f'{args.queue_url}/build/{queue_client.build}', flush=True)
 
     def read_checkpoint():
         if args.no_archive:
@@ -795,7 +902,9 @@ async def run(args):
                 token=os.environ['HF_TOKEN'])).read_text())
         except EntryNotFoundError:
             return None
-    if topics:
+    if queue_client:
+        queue = deque()
+    elif topics:
         queue = deque(search_jobs(topics, licences, args.worker, args.workers, topic_hits))
     elif categories:
         queue = deque(category_jobs(categories, args.worker, args.workers))
@@ -804,7 +913,8 @@ async def run(args):
                       for lo, hi in ranges(args.worker, args.workers))
     done = 0
     resume_seq = 0
-    state = read_checkpoint()
+    # Queue mode never restores a static bin: the queue is the assignment.
+    state = None if queue_client else read_checkpoint()
     if state:
         queue = deque(state['queue'])
         # Crawl-only has no Qdrant to count, so progress rides in the
@@ -858,6 +968,7 @@ async def run(args):
     goal = {'reached': False}
     manifest_seq = resume_seq
     staged_ids = set()
+    reported = 0                # queue mode: images already reported to the job
     start_time, pages, failed, empty = time.monotonic(), 0, 0, 0
     # Fetch concurrency, per worker. Measured on a 50-image page cycle:
     # fetching was 6.7s of 15.7s at concurrency 3 -- the single largest block,
@@ -871,7 +982,7 @@ async def run(args):
     limiter = HostLimiter()
 
     def save():
-        nonlocal manifest_seq
+        nonlocal manifest_seq, reported
         # Data first, so the durable cursor never runs ahead of what it points at.
         ops = []
         if args.no_embed:
@@ -908,6 +1019,18 @@ async def run(args):
                 with_retries(lambda: qc.upsert(COLLECTION, points=batch, wait=True), 'upsert')
             pending_points.clear()
         staged_ids.clear()
+        if queue_client:
+            # One call banks the resume cursor and renews the lease, and it
+            # happens only after the data the cursor points at has landed.
+            job = queue[0] if queue else None
+            if job is not None and job.get('id') is not None:
+                try:
+                    queue_client.progress(job['id'], job.get('continue'), done - reported)
+                except Exception as exc:
+                    print(f'worker {args.worker}: queue progress failed: '
+                          f'{type(exc).__name__}', flush=True)
+            reported = done
+            return
         state = json.dumps({'queue': list(queue), 'uploaded': done, 'done': done,
                             'manifest_seq': manifest_seq, 'pages': pages}).encode()
         if args.no_archive:
@@ -939,66 +1062,120 @@ async def run(args):
                 print(f'worker {args.worker}: HF 429, sleeping {wait}s', flush=True)
                 time.sleep(wait)
 
+    def retire_job(job):
+        """Tell the queue a unit is spent. The job was popped locally first."""
+        if queue_client and job.get('id') is not None:
+            try:
+                if not queue_client.complete(job['id']):
+                    print(f'worker {args.worker}: queue job {job["id"]} was '
+                          f'already reassigned', flush=True)
+            except Exception as exc:
+                print(f'worker {args.worker}: queue complete failed: '
+                      f'{type(exc).__name__}', flush=True)
+
+    def retire():
+        retire_job(queue.popleft())
+
+    def refill():
+        """Queue mode: claim the next unit. False when the queue is dry."""
+        for attempt in range(max(1, args.idle_wait)):
+            try:
+                job = queue_client.claim()
+            except Exception as exc:
+                print(f'worker {args.worker}: queue claim failed: '
+                      f'{type(exc).__name__}', flush=True)
+                job = None
+            if job is not None:
+                queue.append(job)
+                return True
+            if attempt + 1 < max(1, args.idle_wait):
+                print(f'worker {args.worker}: queue empty; waiting 30s for '
+                      f'released work', flush=True)
+                time.sleep(30)
+        return False
+
     async with httpx.AsyncClient(headers={'User-Agent': UA}, follow_redirects=True) as client:
         blips = 0  # consecutive transient Commons error-JSONs; reset on any good page
-        while (queue and done < args.target and not goal['reached']
+        while (done < args.target and not goal['reached']
                and time.monotonic() - start_time < args.max_seconds):
+            if not queue and not (queue_client and refill()):
+                break
             job = queue[0]
-            if 'topic' in job:
-                params = params_for_search(job['topic'], job['lic'], job['band'], job['continue'])
-                end = None  # relevance order; there is no title bound to enforce
-            elif 'cat' in job:
-                params = params_for_category(job['cat'], job['start'], job['end'], job['continue'])
-                end = None  # the shard bound is a sortkey, enforced server-side
+            if job.get('source') == 'openverse':
+                page = (job.get('continue') or {}).get('page', 1)
+                payload = await openverse_page(client, job['name'], page)
+                if payload is None:
+                    print(f'worker {args.worker}: openverse shard spent for '
+                          f'{job["name"]!r}', flush=True)
+                    retire()
+                    save()
+                    continue
+                items = payload.get('results') or []
+                rows = [row for item in items
+                        if (row := openverse_metadata(item, job.get('name', '')))]
+                page_count = int(payload.get('page_count') or page)
+                continuation = {'page': page + 1} if page < page_count else None
+                end = None
+                blips = 0
             else:
-                params = params_for(job['start'], job['end'], job['continue'])
-                end = job['end']
-            r = await request(client, COMMONS, params=params)
-            data = r.json()
-            if data.get('error'):
-                code = data['error'].get('code')
-                if code in ('maxlag', 'ratelimited'):
-                    await asyncio.sleep(30)
-                    continue
-                if transient_commons_error(code):
-                    # Backend blip, not a bad query: wait it out, but not
-                    # forever -- past the cap the error stands and the worker
-                    # dies loudly instead of burning its window one minute at
-                    # a time.
-                    blips += 1
-                    if blips > COMMONS_MAX_BLIPS:
-                        raise RuntimeError(f"Commons API error: {code}")
-                    print(f'worker {args.worker}: Commons blip {code} '
-                          f'({blips}/{COMMONS_MAX_BLIPS}), sleeping 60s', flush=True)
-                    await asyncio.sleep(60)
-                    continue
-                if code == 'cirrussearch-offset-too-large':
-                    # The search API refuses offsets past 10,000. That is the
-                    # shard exhausted, not a failure: licence and width shards
-                    # exist so the clean pool is reachable across several of
-                    # these, and page-id dedupe absorbs any overlap between
-                    # them. Bank what it indexed and take the next shard.
-                    print(f'worker {args.worker}: shard depth reached for '
-                          f'{job.get("topic")!r} / {job.get("lic")!r}', flush=True)
-                    queue.popleft()
-                    blips = 0  # fresh job, fresh streak
-                    save()
-                    continue
-                if code == 'urlparamnormal':
-                    # One unrepresentable cursor should cost a job, not a
-                    # worker. Drop this job, keep whatever it already indexed,
-                    # and move to the next one. Job shape differs by mode
-                    # (ranges have start/end, topic shards have topic/lic/band).
-                    label = drop_label(job)
-                    print(f'worker {args.worker}: dropping job '
-                          f'{label!r} after {code}', flush=True)
-                    queue.popleft()
-                    blips = 0  # fresh job, fresh streak
-                    save()
-                    continue
-                raise RuntimeError(f"Commons API error: {code}")
-            blips = 0  # a clean page clears the blip streak
-            rows = [row for p in data.get('query', {}).get('pages', []) if (row := metadata(p, end))]
+                name = job.get('topic') or job.get('name')
+                if 'cat' in job:
+                    params = params_for_category(job['cat'], job['start'], job['end'], job['continue'])
+                    end = None  # the shard bound is a sortkey, enforced server-side
+                elif name is not None and 'lic' in job:
+                    params = params_for_search(name, job['lic'], job['band'], job['continue'])
+                    end = None  # relevance order; there is no title bound to enforce
+                else:
+                    params = params_for(job['start'], job['end'], job['continue'])
+                    end = job['end']
+                r = await request(client, COMMONS, params=params)
+                data = r.json()
+                if data.get('error'):
+                    code = data['error'].get('code')
+                    if code in ('maxlag', 'ratelimited'):
+                        await asyncio.sleep(30)
+                        continue
+                    if transient_commons_error(code):
+                        # Backend blip, not a bad query: wait it out, but not
+                        # forever -- past the cap the error stands and the worker
+                        # dies loudly instead of burning its window one minute at
+                        # a time.
+                        blips += 1
+                        if blips > COMMONS_MAX_BLIPS:
+                            raise RuntimeError(f"Commons API error: {code}")
+                        print(f'worker {args.worker}: Commons blip {code} '
+                              f'({blips}/{COMMONS_MAX_BLIPS}), sleeping 60s', flush=True)
+                        await asyncio.sleep(60)
+                        continue
+                    if code == 'cirrussearch-offset-too-large':
+                        # The search API refuses offsets past 10,000. That is the
+                        # shard exhausted, not a failure: licence and width shards
+                        # exist so the clean pool is reachable across several of
+                        # these, and page-id dedupe absorbs any overlap between
+                        # them. Bank what it indexed and take the next shard.
+                        print(f'worker {args.worker}: shard depth reached for '
+                              f'{job.get("topic", job.get("name"))!r} / '
+                              f'{job.get("lic")!r}', flush=True)
+                        retire()
+                        blips = 0  # fresh job, fresh streak
+                        save()
+                        continue
+                    if code == 'urlparamnormal':
+                        # One unrepresentable cursor should cost a job, not a
+                        # worker. Drop this job, keep whatever it already indexed,
+                        # and move to the next one. Job shape differs by mode
+                        # (ranges have start/end, topic shards have topic/lic/band).
+                        label = drop_label(job)
+                        print(f'worker {args.worker}: dropping job '
+                              f'{label!r} after {code}', flush=True)
+                        retire()
+                        blips = 0  # fresh job, fresh streak
+                        save()
+                        continue
+                    raise RuntimeError(f"Commons API error: {code}")
+                blips = 0  # a clean page clears the blip streak
+                rows = [row for p in data.get('query', {}).get('pages', []) if (row := metadata(p, end))]
+                continuation = data.get('continue')
             rows = list({row['image_id']: row for row in rows}.values())
             if rows:
                 # Crawl-only has nothing to ask: the embed pass skips rows
@@ -1070,8 +1247,9 @@ async def run(args):
                 # `sunset` on identical hit counts, which is exactly why a
                 # fixed harvest depth cannot work.
                 relevant = np.ones(len(chunk), dtype=bool)
-                if relevance is not None and 'topic' in job:
-                    scores = relevance.score(job['topic'], vectors)
+                prompt = job.get('topic') or job.get('name')
+                if relevance is not None and prompt:
+                    scores = relevance.score(prompt, vectors)
                     # A RUNNING HIGH-WATER MARK, not the opening batch.
                     # Calibration killed the opening-batch design: `sunset`
                     # opens at .0111 and then sits at .07-.09 for the next
@@ -1128,32 +1306,37 @@ async def run(args):
             # after that, and this stops both before it matters.
             job['kept'] = job.get('kept', 0) + produced
             if args.shard_depth and job['kept'] >= args.shard_depth:
-                print(f'worker {args.worker}: {job.get("topic", job.get("cat"))!r} '
+                print(f'worker {args.worker}: '
+                      f'{job.get("topic", job.get("name", job.get("cat")))!r} '
                       f'hit its {args.shard_depth}-row cap', flush=True)
-                queue.popleft()
+                retire()
                 save()
                 continue
             job['barren'] = 0 if produced else job.get('barren', 0) + 1
             if job['barren'] >= args.barren_patience:
                 print(f'worker {args.worker}: nothing new in {job["barren"]} pages, '
                       f'dropping shard', flush=True)
-                queue.popleft()
+                retire()
                 save()
                 continue
             queue.popleft()
-            continuation = data.get('continue')
             if job.get('decayed', 0) >= args.relevance_patience:
                 # Spent: this topic has stopped returning itself. Bank the rows
                 # and take the next shard rather than paying for the tail.
-                print(f'worker {args.worker}: {job.get("topic")!r} exhausted at '
-                      f'{job["continue"].get("gsroffset", 0)}', flush=True)
+                print(f'worker {args.worker}: '
+                      f'{job.get("topic", job.get("name"))!r} exhausted at '
+                      f'{(job.get("continue") or {}).get("gsroffset", 0)}', flush=True)
+                retire_job(job)
                 save()
                 continue
             if continuation:
-                if continuation == job['continue']:
-                    raise RuntimeError('Commons repeated a continuation cursor')
+                if continuation == job.get('continue'):
+                    raise RuntimeError('source repeated a continuation cursor')
                 job['continue'] = continuation
                 queue.append(job)
+            elif queue_client:
+                # The page stream ended: this unit is finished.
+                retire_job(job)
             pages += 1
             # Ten pages that found rows and indexed none means something is
             # broken upstream. It must count what the page PRODUCED, not what
@@ -1184,6 +1367,18 @@ async def run(args):
             # actually matters; this is a second, softer brake.
             await asyncio.sleep(0.3)
         save()
+    if queue_client and queue:
+        # Exiting with a unit mid-flight: hand it back immediately so another
+        # worker resumes from the saved cursor instead of waiting out the lease.
+        job = queue[0]
+        if job.get('id') is not None:
+            try:
+                queue_client.release(job['id'])
+                print(f'worker {args.worker}: released job {job["id"]} for resume',
+                      flush=True)
+            except Exception as exc:
+                print(f'worker {args.worker}: release failed: '
+                      f'{type(exc).__name__}', flush=True)
     if goal['reached']:
         print(f'GOAL: the collection reached {args.stop_at_total:,}; this worker stops at '
               f'{done}/{args.target} of its own share. Nothing to resume.', flush=True)
@@ -1211,7 +1406,9 @@ if __name__ == '__main__':
     p = argparse.ArgumentParser()
     p.add_argument('--worker', type=int, required=True)
     p.add_argument('--workers', type=int, default=4)
-    p.add_argument('--target', type=int, required=True)
+    p.add_argument('--target', type=int, default=0,
+                   help='per-worker image cap. Required outside queue mode; in '
+                        'queue mode 0 means "until the queue is empty".')
     p.add_argument('--build', default='commons-v1')
     p.add_argument('--topics', default='',
                    help='path to a topic list (one search string per line, # for '
@@ -1291,13 +1488,29 @@ if __name__ == '__main__':
                         'no payment method. The cost is that changing embedding '
                         'model means crawling again rather than re-reading a '
                         'bucket.')
+    p.add_argument('--queue-url', default='',
+                   help='crawl-queue service base URL. When set, work is claimed '
+                        'unit by unit with leases and retries instead of being '
+                        'derived statically; a dead worker\'s units are reissued '
+                        'and every worker drains the same queue until it is empty.')
+    p.add_argument('--queue-build', default='',
+                   help='build name inside the queue (defaults to --build)')
+    p.add_argument('--queue-worker', default='',
+                   help='unique claimant id (defaults to <build>-<worker>)')
+    p.add_argument('--queue-lease', type=int, default=1200,
+                   help='lease seconds; renewed on every save()')
+    p.add_argument('--idle-wait', type=int, default=3,
+                   help='claim retries (30s apart) before a worker concludes the '
+                        'queue is empty and exits')
     p.add_argument('--no-embed', action='store_true',
                    help='crawl only: derivatives to the bucket, metadata to a '
                         'manifest, no SigLIP and no Qdrant. Embedding then runs '
                         'separately on a GPU reading from that bucket.')
     args = p.parse_args()
-    if args.workers < 1 or not 0 <= args.worker < args.workers or args.target < 1:
-        p.error('invalid worker/target configuration')
+    if args.workers < 1 or not 0 <= args.worker < args.workers:
+        p.error('invalid worker configuration')
+    if not args.queue_url and args.target < 1:
+        p.error('--target is required outside queue mode')
     if args.no_embed and args.no_archive:
         # --no-embed writes derivatives for a later GPU pass to read;
         # --no-archive keeps no derivative at all. Together they would crawl
