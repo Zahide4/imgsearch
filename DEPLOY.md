@@ -1,8 +1,8 @@
 # Cloud deployment and corpus build
 
-The public application runs `server/` on Render. Query text is embedded there;
-Qdrant Cloud stores vectors and metadata. Browsers load images through wsrv.nl.
-`server.py` and `static_site/` are older local/browser experiments, not the Render app.
+The public application runs `server/` (FastAPI) on a Hetzner box, with Qdrant
+beside it. The app loads Wikimedia thumbnails; older corpus rows may still
+point at the wsrv.nl proxy.
 
 ## 4K renditions (added 2026-09-12)
 
