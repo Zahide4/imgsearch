@@ -142,13 +142,8 @@ jobs:
       matrix:
         worker: ${{ fromJson(needs.plan.outputs.matrix) }}
     env:
-      # Only to authenticate the SigLIP weight download. Twenty runners
-      # pulling 600 MB from the Hub at once unauthenticated is exactly the
-      # shape of request that gets rate-limited. Nothing is written to HF:
-      # --no-archive means there is no repo and no commit.
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}
-      QDRANT_URL: ${{ secrets.QDRANT_URL }}
-      QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+      # Secrets are injected only into the step that needs them; the install
+      # steps run with no credentials in their environment.
       QDRANT_COLLECTION: ${{ vars.QDRANT_COLLECTION || 'images-v2' }}
       # Not 's3'. storage.enabled() is then false and upload_batch no-ops, so
       # no credential can lead to an accidental upload from this workflow.
@@ -157,8 +152,8 @@ jobs:
       PYTHONUNBUFFERED: '1'
       TOKENIZERS_PARALLELISM: 'false'
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.11'
       - name: Install CPU embedding runtime
@@ -166,13 +161,13 @@ jobs:
           # torchvision must come from the same index as torch: open_clip
           # imports it, and a PyPI (CUDA) build against a cpu-index torch
           # fails with "operator torchvision::nms does not exist".
-          pip install -q torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          pip install -q torch==2.14.0 torchvision==0.29.0 --index-url https://download.pytorch.org/whl/cpu
           # fastembed is not optional: sparse.py builds the BM25 half of
           # hybrid retrieval client-side, because a self-hosted Qdrant has no
           # inference service to do it.
-          pip install -q open_clip_torch==3.3.0 httpx Pillow numpy \
-            sentencepiece protobuf transformers huggingface_hub \
-            qdrant-client fastembed
+          pip install -q open_clip_torch==3.3.0 httpx==0.28.1 Pillow==12.3.0 numpy==2.5.3 \
+            sentencepiece==0.2.2 protobuf==7.36.1 transformers==5.17.0 huggingface_hub==1.31.0 \
+            qdrant-client==1.19.0 fastembed==0.8.0
       - name: Crawl, embed, score and index
         id: crawl
         env:
@@ -190,7 +185,21 @@ jobs:
           MAX_SECONDS: ${{ inputs.max_seconds }}
           WORKER: ${{ matrix.worker }}
           WORKERS: ${{ inputs.workers }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          QDRANT_URL: ${{ secrets.QDRANT_URL }}
+          QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
         run: |
+          # The topics file must be something that ships with this commit;
+          # an absolute or parent path could read arbitrary runner files
+          # while the job holds production secrets.
+          if [ -n "$TOPICS" ]; then
+            case "$TOPICS" in
+              /*|*..*) echo "::error title=Bad topics path::must be repository-relative, got '$TOPICS'"; exit 1 ;;
+            esac
+            [ -f "$TOPICS" ] || { echo "::error title=Missing topics file::$TOPICS is not in the checkout"; exit 1; }
+          fi
+          [[ "$WORKERS" =~ ^[0-9]+$ ]] || { echo "::error title=Bad workers::got '$WORKERS'"; exit 1; }
+          [[ "$MAX_SECONDS" =~ ^[0-9]+$ ]] || { echo "::error title=Bad max_seconds::got '$MAX_SECONDS'"; exit 1; }
           set +e
           python cloud_corpus.py --no-archive \
             --worker "$WORKER" --workers "$WORKERS" \
@@ -215,7 +224,7 @@ jobs:
           exit "$code"
       - name: Flag this worker as having work left
         if: steps.crawl.outputs.resume == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: resume-${{ matrix.worker }}
           path: resume-flag.txt

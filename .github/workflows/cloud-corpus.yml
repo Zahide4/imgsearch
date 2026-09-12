@@ -36,10 +36,6 @@ jobs:
       matrix:
         worker: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19]
     env:
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}
-      HF_REPO: ${{ secrets.HF_REPO }}
-      QDRANT_URL: ${{ secrets.QDRANT_URL }}
-      QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
       QDRANT_COLLECTION: images-v2
       # Derivatives go to our own bucket. Unset these and storage.py falls back
       # to the public resizing proxy, which is exactly the dependency the 10M
@@ -52,26 +48,38 @@ jobs:
       # The row stores the object key; the API signs it per request.
       S3_PRIVATE: ${{ vars.S3_PRIVATE }}
       CDN_BASE: ${{ vars.CDN_BASE }}
-      S3_KEY: ${{ secrets.S3_KEY }}
-      S3_SECRET: ${{ secrets.S3_SECRET }}
       CRAWL_UA: ImgSearch/0.2 (https://github.com/Zahide4/imgsearch)
       PYTHONUNBUFFERED: '1'
       TOKENIZERS_PARALLELISM: 'false'
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.11'
       - name: Install CPU embedding runtime
         run: |
-          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-          pip install open_clip_torch==3.3.0 httpx Pillow numpy sentencepiece protobuf transformers huggingface_hub qdrant-client
+          pip install torch==2.14.0 torchvision==0.29.0 --index-url https://download.pytorch.org/whl/cpu
+          pip install open_clip_torch==3.3.0 httpx==0.28.1 Pillow==12.3.0 numpy==2.5.3 \
+            sentencepiece==0.2.2 protobuf==7.36.1 transformers==5.17.0 huggingface_hub==1.31.0 \
+            qdrant-client==1.19.0
       - name: Crawl, embed, archive, and index
         env:
           TARGET: ${{ inputs.target_per_worker }}
           BUILD: ${{ inputs.build }}
           WORKER: ${{ matrix.worker }}
+          NO_EMBED: ${{ inputs.no_embed }}
+          # Secrets live only in the step that runs the corpus code, never in
+          # the environment of the install steps.
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_REPO: ${{ secrets.HF_REPO }}
+          QDRANT_URL: ${{ secrets.QDRANT_URL }}
+          QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+          S3_KEY: ${{ secrets.S3_KEY }}
+          S3_SECRET: ${{ secrets.S3_SECRET }}
         run: |
+          [[ "$TARGET" =~ ^[0-9]+$ ]] || { echo "::error title=Bad target_per_worker::got '$TARGET'"; exit 1; }
+          flags=()
+          if [ "$NO_EMBED" = "true" ]; then flags+=(--no-embed); fi
           python cloud_corpus.py --worker "$WORKER" --workers 20 \
             --target "$TARGET" --build "$BUILD" \
-            ${{ inputs.no_embed && '--no-embed' || '' }}
+            "${flags[@]}"
