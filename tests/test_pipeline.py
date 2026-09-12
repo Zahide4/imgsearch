@@ -180,6 +180,62 @@ class SearchTests(unittest.IsolatedAsyncioTestCase):
         r=await self.client.get('/api/search',params={'q':'!!!'})
         self.assertEqual(r.json()['results'],[])
 
+class RenditionUrlTests(unittest.TestCase):
+    """The 4K rendition lives on Wikimedia's standard buckets, because
+    hotlinking any other width is a 400. Smaller originals keep the original:
+    asking for the 3840 bucket upscales them into a bigger, lesser file."""
+
+    def test_swaps_the_bucket_width_on_wikimedia_thumbs(self):
+        payload = {'width': 8368,
+                   'thumb_origin': 'https://thumb.wikimedia.org/wikipedia/commons/thumb/d/dc/Forest.jpg/500px-Forest.jpg',
+                   'full_url': 'https://upload.wikimedia.org/wikipedia/commons/d/dc/Forest.jpg'}
+        self.assertEqual(api.rendition_url(payload),
+            'https://thumb.wikimedia.org/wikipedia/commons/thumb/d/dc/Forest.jpg/3840px-Forest.jpg')
+
+    def test_small_originals_stay_original(self):
+        payload = {'width': 2400,
+                   'thumb_origin': 'https://thumb.wikimedia.org/wikipedia/commons/thumb/d/dc/X.jpg/500px-X.jpg'}
+        self.assertEqual(api.rendition_url(payload), '')
+
+    def test_missing_width_stays_original(self):
+        self.assertEqual(api.rendition_url({'width': None, 'thumb_origin': 'https://thumb.wikimedia.org/x'}), '')
+
+    def test_builds_from_the_original_when_no_thumb_origin(self):
+        payload = {'width': 6000, 'thumb_origin': '',
+                   'full_url': 'https://upload.wikimedia.org/wikipedia/commons/a/ab/Name%20X.jpg'}
+        self.assertEqual(api.rendition_url(payload),
+            'https://upload.wikimedia.org/wikipedia/commons/thumb/a/ab/Name%20X.jpg/3840px-Name%20X.jpg')
+
+    def test_keeps_a_lossy_page_prefix(self):
+        payload = {'width': 6000,
+                   'thumb_origin': 'https://thumb.wikimedia.org/wikipedia/commons/thumb/1/2/Scan.tif/lossy-page1-500px-Scan.tif.jpg'}
+        self.assertEqual(api.rendition_url(payload),
+            'https://thumb.wikimedia.org/wikipedia/commons/thumb/1/2/Scan.tif/lossy-page1-3840px-Scan.tif.jpg')
+
+    def test_a_filename_containing_px_is_not_the_width_token(self):
+        payload = {'width': 6000,
+                   'thumb_origin': 'https://thumb.wikimedia.org/wikipedia/commons/thumb/d/dc/1920px-Banner.jpg/500px-1920px-Banner.jpg'}
+        self.assertEqual(api.rendition_url(payload),
+            'https://thumb.wikimedia.org/wikipedia/commons/thumb/d/dc/1920px-Banner.jpg/3840px-1920px-Banner.jpg')
+
+    def test_skips_animated_and_vector_renditions(self):
+        thumb = 'https://thumb.wikimedia.org/wikipedia/commons/thumb/a/ab/'
+        self.assertEqual(api.rendition_url({'width': 6000, 'thumb_origin': thumb + 'Anim.gif/500px-Anim.gif'}), '')
+        self.assertEqual(api.rendition_url({'width': 6000, 'thumb_origin': thumb + 'Diagram.svg/500px-Diagram.svg.png'}), '')
+        self.assertEqual(api.rendition_url({'width': 6000,
+            'full_url': 'https://upload.wikimedia.org/wikipedia/commons/a/ab/Anim.gif'}), '')
+
+    def test_ignores_non_wikimedia_sources(self):
+        payload = {'width': 6000, 'thumb_origin': 'https://wsrv.nl/?url=x',
+                   'full_url': 'https://live.staticflickr.com/1/2/x.jpg'}
+        self.assertEqual(api.rendition_url(payload), '')
+
+    def test_results_carry_the_field(self):
+        hit = SimpleNamespace(score=0.5, payload={'image_id': 'commons:1', 'title': 'X', 'width': 8368,
+            'thumb_origin': 'https://thumb.wikimedia.org/wikipedia/commons/thumb/d/dc/Forest.jpg/500px-Forest.jpg'})
+        self.assertIn('rendition_url', api.result_from(hit))
+
+
 class RefusalTests(unittest.IsolatedAsyncioTestCase):
     """Adult queries get a hard refusal, never a result set. The embed tower
     is absent here (S['sess'] is None), which also proves the fail-open and
@@ -572,3 +628,168 @@ class SearchHarvestTest(unittest.TestCase):
         self.assertTrue(cloud_corpus.CLEAN_LICENCES)
         for lic in cloud_corpus.CLEAN_LICENCES:
             self.assertNotIn('SA', lic.upper().replace('-', ''))
+
+class ResumeSignalTest(unittest.TestCase):
+    """The workflow restarts a build when a worker exits 75, so 75 must mean
+    "out of time with jobs still queued" and nothing else."""
+
+    def test_out_of_time_with_jobs_left_asks_for_a_restart(self):
+        self.assertEqual(cloud_corpus.exit_code(10, 100, [{'topic': 'x'}]), 75)
+
+    def test_empty_queue_is_finished_even_below_target(self):
+        # A worker whose whole bin is spent is done, not paused. Exiting 75 here
+        # would make a self-restarting build relaunch finished workers until its
+        # restart cap ran out.
+        self.assertEqual(cloud_corpus.exit_code(10, 100, []), 0)
+
+    def test_reaching_target_is_finished(self):
+        self.assertEqual(cloud_corpus.exit_code(100, 100, [{'topic': 'x'}]), 0)
+
+
+class QdrantRetryTest(unittest.TestCase):
+    """A dropped connection must cost a retry, not a worker: one killed worker
+    45 of build 10m-0911 an hour into its window."""
+
+    def dropped(self):
+        from qdrant_client.http.exceptions import ResponseHandlingException
+        return ResponseHandlingException(httpx.RemoteProtocolError(
+            'peer closed connection without sending complete message body'))
+
+    def test_a_dropped_connection_is_retried_until_it_succeeds(self):
+        calls, naps = [], []
+        def flaky():
+            calls.append(1)
+            if len(calls) < 3:
+                raise self.dropped()
+            return 'ok'
+        self.assertEqual(cloud_corpus.with_retries(flaky, 'retrieve', sleep=naps.append), 'ok')
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(naps, list(cloud_corpus.QDRANT_RETRY_DELAYS[:2]))
+
+    def test_it_gives_up_after_the_last_delay(self):
+        calls, naps = [], []
+        def down():
+            calls.append(1)
+            raise self.dropped()
+        with self.assertRaises(Exception):
+            cloud_corpus.with_retries(down, 'upsert', sleep=naps.append)
+        self.assertEqual(len(calls), len(cloud_corpus.QDRANT_RETRY_DELAYS) + 1)
+        self.assertEqual(naps, list(cloud_corpus.QDRANT_RETRY_DELAYS))
+
+    def test_a_real_error_is_not_retried(self):
+        calls, naps = [], []
+        def broken():
+            calls.append(1)
+            raise ValueError('bad request shape')
+        with self.assertRaises(ValueError):
+            cloud_corpus.with_retries(broken, 'count', sleep=naps.append)
+        self.assertEqual((len(calls), naps), (1, []))
+
+    def test_server_errors_retry_and_client_errors_do_not(self):
+        from qdrant_client.http.exceptions import UnexpectedResponse
+        def status(code):
+            return UnexpectedResponse(code, 'x', b'', httpx.Headers())
+        self.assertTrue(cloud_corpus.transient_qdrant_error(status(503)))
+        self.assertTrue(cloud_corpus.transient_qdrant_error(status(429)))
+        self.assertFalse(cloud_corpus.transient_qdrant_error(status(400)))
+        self.assertTrue(cloud_corpus.transient_qdrant_error(httpx.ReadTimeout('slow')))
+
+
+class GoalStopTest(unittest.TestCase):
+    """--stop-at-total ends the whole build at the corpus goal, so lanes can run
+    past a per-lane quota without the build overshooting it."""
+
+    def test_goal_met_only_at_or_past_the_line(self):
+        self.assertTrue(cloud_corpus.goal_met(10_000_000, 10_000_000))
+        self.assertFalse(cloud_corpus.goal_met(9_999_999, 10_000_000))
+
+    def test_zero_disables_the_goal(self):
+        self.assertFalse(cloud_corpus.goal_met(50_000_000, 0))
+
+    def test_reaching_the_goal_ends_the_build_with_jobs_left(self):
+        # Exit 0, not 75: no resume flag, so the build stops instead of restarting.
+        self.assertEqual(cloud_corpus.exit_code(10, 1_000_000, [{'topic': 'x'}], goal_reached=True), 0)
+
+
+class CommonsBlipTest(unittest.TestCase):
+    """A Commons backend blip must cost a minute, not a worker: worker 37 of
+    build 10m-0911 died 2.5h in on internal_api_error_DBConnectionError."""
+
+    def test_blip_codes_retry_and_bad_codes_do_not(self):
+        self.assertTrue(cloud_corpus.transient_commons_error('maxlag'))
+        self.assertTrue(cloud_corpus.transient_commons_error('ratelimited'))
+        self.assertTrue(cloud_corpus.transient_commons_error('readonly'))
+        self.assertTrue(cloud_corpus.transient_commons_error(
+            'internal_api_error_DBConnectionError'))
+        self.assertTrue(cloud_corpus.transient_commons_error(
+            'internal_api_error_DBQueryError'))
+        self.assertTrue(cloud_corpus.transient_commons_error(
+            'cirrussearch-too-busy-error'))
+        self.assertFalse(cloud_corpus.transient_commons_error(None))
+        self.assertFalse(cloud_corpus.transient_commons_error(''))
+        self.assertFalse(cloud_corpus.transient_commons_error('urlparamnormal'))
+        self.assertFalse(cloud_corpus.transient_commons_error(
+            'cirrussearch-offset-too-large'))
+        self.assertFalse(cloud_corpus.transient_commons_error('badvalue'))
+
+    def test_blip_cap_is_a_small_positive_number(self):
+        self.assertIsInstance(cloud_corpus.COMMONS_MAX_BLIPS, int)
+        self.assertGreaterEqual(cloud_corpus.COMMONS_MAX_BLIPS, 1)
+
+    def test_drop_label_uses_lic_for_topic_shards(self):
+        # Regression: the label read 'licence' while search jobs carry 'lic',
+        # so the drop line printed None instead of the shard.
+        job = {'topic': 'sunset', 'lic': 'CC-Zero', 'band': 'filew:>3000',
+               'continue': {}}
+        self.assertEqual(cloud_corpus.drop_label(job),
+                         {'topic': 'sunset', 'lic': 'CC-Zero',
+                          'band': 'filew:>3000'})
+
+    def test_drop_label_prefers_start_for_range_shards(self):
+        job = {'start': 'A', 'end': 'B', 'continue': {}}
+        self.assertEqual(cloud_corpus.drop_label(job), 'A')
+
+
+class SafeExtractTests(unittest.TestCase):
+    """cloud_sync's shard extraction must never write outside the thumbs dir."""
+
+    @staticmethod
+    def _tar_bytes(name, *, type_=None, linkname=''):
+        import io
+        import tarfile
+        payload = b'webp'
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode='w') as tar:
+            info = tarfile.TarInfo(name)
+            info.size = len(payload)
+            if type_ is not None:
+                info.type = type_
+                info.linkname = linkname
+                info.size = 0
+            tar.addfile(info, io.BytesIO(payload))
+        buffer.seek(0)
+        return buffer
+
+    def test_rejects_escaping_and_link_members(self):
+        import tarfile
+        import tempfile
+        from cloud_sync import safe_extract
+        cases = [('../escape.webp', None, ''),
+                 ('/abs/escape.webp', None, ''),
+                 ('link.webp', tarfile.SYMTYPE, '/etc/passwd'),
+                 ('hard.webp', tarfile.LNKTYPE, 'target.webp')]
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, type_, linkname in cases:
+                with tarfile.open(fileobj=self._tar_bytes(name, type_=type_,
+                                                          linkname=linkname)) as tar:
+                    with self.assertRaises(ValueError, msg=name):
+                        safe_extract(tar, Path(tmp))
+
+    def test_accepts_regular_file(self):
+        import tarfile
+        import tempfile
+        from cloud_sync import safe_extract
+        with tempfile.TemporaryDirectory() as tmp:
+            with tarfile.open(fileobj=self._tar_bytes('fine.webp')) as tar:
+                safe_extract(tar, Path(tmp))
+            self.assertTrue((Path(tmp) / 'fine.webp').exists())

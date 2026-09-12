@@ -257,6 +257,71 @@ def sign(key):
         return ''
 
 
+# Wikimedia now rejects thumbnail widths outside its standard buckets with a
+# 400 on hotlinks (20/40/60/120/250/330/500/960/1280/1920/3840), so the only
+# useful large rendition is the 3840 bucket. It is also the whole reason the
+# app can prepare a drag in ~1-5 MB instead of pulling a 20-30 MB original.
+RENDITION_WIDTH = 3840
+_THUMB_HOSTS = {'thumb.wikimedia.org', 'upload.wikimedia.org'}
+# Animated GIF and SVG renditions are stills of the original; hand those
+# originals over instead of silently flattening them.
+_THUMB_STATIC_TAILS = ('.gif', '.svg', '.svg.png')
+
+
+def rendition_url(payload):
+    """The 4K rendition for this row, or '' when the original should be used.
+
+    Only worth it when the original is actually bigger than 4K: requesting
+    the 3840 bucket for a smaller image makes Wikimedia upscale it, measured
+    at 2.3 MB where the 1.3 MB original was both smaller and truer. Skipped
+    formats and non-Wikimedia sources fall through to the original, which the
+    app already fetches today.
+    """
+    try:
+        width = int(payload.get('width') or 0)
+    except (TypeError, ValueError):
+        return ''
+    if width <= RENDITION_WIDTH:
+        return ''
+    return (_swap_thumb_width(payload.get('thumb_origin', ''))
+            or _commons_thumb_from_original(payload.get('full_url', '')))
+
+
+def _swap_thumb_width(url):
+    """Replace the width token of an existing Wikimedia thumbnail URL."""
+    from urllib.parse import urlsplit, urlunsplit
+    parts = urlsplit(url)
+    if parts.scheme not in ('http', 'https') or parts.netloc.lower() not in _THUMB_HOSTS:
+        return ''
+    if '/thumb/' not in parts.path:
+        return ''
+    # The width token lives in the FINAL path segment, possibly after a
+    # MediaWiki prefix (lossy-page1-500px-...), and is the first `\d+px-`
+    # there -- the original's own name follows it.
+    directory, _, name = parts.path.rpartition('/')
+    match = re.search(r'\d+px-', name)
+    if not match or parts.path.lower().endswith(_THUMB_STATIC_TAILS):
+        return ''
+    swapped = name[:match.start()] + f'{RENDITION_WIDTH}px-' + name[match.end():]
+    return urlunsplit((parts.scheme, parts.netloc, f'{directory}/{swapped}', '', ''))
+
+
+def _commons_thumb_from_original(url):
+    """Canonical Commons thumbnail for rows with no usable thumb_origin."""
+    from urllib.parse import urlsplit, urlunsplit
+    parts = urlsplit(url)
+    if parts.scheme not in ('http', 'https') or parts.netloc.lower() != 'upload.wikimedia.org':
+        return ''
+    marker = '/wikipedia/commons/'
+    if not parts.path.startswith(marker) or '/thumb/' in parts.path:
+        return ''
+    name = parts.path[len(marker):].rsplit('/', 1)[-1]
+    if not name or name.lower().endswith(_THUMB_STATIC_TAILS):
+        return ''
+    path = f'{marker}thumb/{parts.path[len(marker):]}/{RENDITION_WIDTH}px-{name}'
+    return urlunsplit((parts.scheme, parts.netloc, path, '', ''))
+
+
 def sparse_query(text):
     """The BM25 half of the query, built here or by Qdrant Cloud."""
     if LOCAL_SPARSE:
@@ -314,7 +379,7 @@ def result_from(hit):
                 license=p.get('license', ''), license_class=p.get('license_class', ''),
                 license_url=p.get('license_url', ''), source_url=p.get('source_url', ''),
                 full_url=p.get('full_url', ''), width=p.get('width', 0), height=p.get('height', 0),
-                thumb=thumb, score=round(float(hit.score), 4))
+                thumb=thumb, rendition_url=rendition_url(p), score=round(float(hit.score), 4))
 
 
 @app.get('/api/search')

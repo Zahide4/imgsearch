@@ -1,4 +1,5 @@
 name: 10M corpus (standalone, no storage)
+run-name: "${{ inputs.build }} - restart ${{ inputs.resume_count }}"
 
 # The 10M build. Each runner crawls Commons, embeds with SigLIP on its own
 # CPU, scores for safety, and upserts straight to Qdrant. Nothing is parked
@@ -56,13 +57,44 @@ on:
         required: true
       workers:
         description: >-
-          How many parallel crawlers. Must match the account's Actions
-          concurrency: 20 on Free, 40 on Pro, 60 on Team. Changing it
-          reshuffles range assignment AND invalidates every saved cursor,
+          TOTAL crawlers in the build, across every repo taking part. Changing
+          it reshuffles job assignment AND invalidates every saved cursor,
           because the checkpoint key contains the worker count -- so pick a
-          number and keep it for the whole build.
+          number and keep it for the whole build. Each repo's Actions
+          concurrency caps how many run at once there: 20 on Free, 40 on Pro.
         default: '20'
         required: true
+      first_worker:
+        description: >-
+          First worker index this repo runs. Leave 0 for a single-repo build.
+          To split one build across accounts, give every repo the same
+          `workers` and `build` and non-overlapping slices -- e.g. workers=60
+          with first_worker=0 lanes=40 on the Pro account and first_worker=40
+          lanes=20 on the Free one. Both must dispatch the SAME commit: every
+          runner computes job assignment on its own from the code, the topic
+          list and its sidecar, and any difference makes two runners crawl the
+          same shards while others go untouched.
+        default: '0'
+        required: false
+      lanes:
+        description: >-
+          How many workers, from first_worker on, this repo runs. Empty means
+          every remaining worker.
+        default: ''
+        required: false
+      resume_count:
+        description: >-
+          How many times this build has restarted itself. Leave 0 when
+          starting a build; the resume job sets it on every restart.
+        default: '0'
+        required: false
+      max_resumes:
+        description: >-
+          Most restarts this build may give itself before stopping for a
+          person. 8 restarts of a 4.5 h window is ~40 h, well past a full 10M
+          build; the cap only exists so a bug cannot loop forever.
+        default: '8'
+        required: false
 
 permissions:
   contents: read
@@ -79,8 +111,22 @@ jobs:
       matrix: ${{ steps.gen.outputs.matrix }}
     steps:
       - id: gen
+        # Inputs come in through env rather than ${{ }} spliced into the script.
+        env:
+          TOTAL: ${{ inputs.workers }}
+          FIRST: ${{ inputs.first_worker }}
+          LANES: ${{ inputs.lanes }}
         run: |
-          python3 -c "import json;print('matrix='+json.dumps(list(range(${{ inputs.workers }}))))" >> "$GITHUB_OUTPUT"
+          python3 - >> "$GITHUB_OUTPUT" <<'PY'
+          import json, os
+          total = int(os.environ['TOTAL'])
+          first = int(os.environ.get('FIRST') or 0)
+          lanes = int(os.environ.get('LANES') or total - first)
+          # A bad slice must stop the build here, not quietly run the wrong workers.
+          if total < 1 or not 0 <= first < total or lanes < 1:
+              raise SystemExit(f'bad slice: first_worker={first} lanes={lanes} workers={total}')
+          print('matrix=' + json.dumps(list(range(first, min(first + lanes, total)))))
+          PY
 
   build:
     needs: plan
@@ -96,13 +142,8 @@ jobs:
       matrix:
         worker: ${{ fromJson(needs.plan.outputs.matrix) }}
     env:
-      # Only to authenticate the SigLIP weight download. Twenty runners
-      # pulling 600 MB from the Hub at once unauthenticated is exactly the
-      # shape of request that gets rate-limited. Nothing is written to HF:
-      # --no-archive means there is no repo and no commit.
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}
-      QDRANT_URL: ${{ secrets.QDRANT_URL }}
-      QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+      # Secrets are injected only into the step that needs them; the install
+      # steps run with no credentials in their environment.
       QDRANT_COLLECTION: ${{ vars.QDRANT_COLLECTION || 'images-v2' }}
       # Not 's3'. storage.enabled() is then false and upload_batch no-ops, so
       # no credential can lead to an accidental upload from this workflow.
@@ -111,8 +152,8 @@ jobs:
       PYTHONUNBUFFERED: '1'
       TOKENIZERS_PARALLELISM: 'false'
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.11'
       - name: Install CPU embedding runtime
@@ -120,30 +161,53 @@ jobs:
           # torchvision must come from the same index as torch: open_clip
           # imports it, and a PyPI (CUDA) build against a cpu-index torch
           # fails with "operator torchvision::nms does not exist".
-          pip install -q torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          pip install -q torch==2.14.0 torchvision==0.29.0 --index-url https://download.pytorch.org/whl/cpu
           # fastembed is not optional: sparse.py builds the BM25 half of
           # hybrid retrieval client-side, because a self-hosted Qdrant has no
           # inference service to do it.
-          pip install -q open_clip_torch==3.3.0 httpx Pillow numpy \
-            sentencepiece protobuf transformers huggingface_hub \
-            qdrant-client fastembed
+          pip install -q open_clip_torch==3.3.0 httpx==0.28.1 Pillow==12.3.0 numpy==2.5.3 \
+            sentencepiece==0.2.2 protobuf==7.36.1 transformers==5.17.0 huggingface_hub==1.31.0 \
+            qdrant-client==1.19.0 fastembed==0.8.0
       - name: Crawl, embed, score and index
+        id: crawl
         env:
-          TARGET: ${{ inputs.target_per_worker }}
+          # A repo variable overrides the input when set. A running build
+          # restarts itself with its original input, so a variable is the only
+          # way to change a lane's quota mid-build, and the dispatch form is
+          # already at GitHub's 10-input limit.
+          TARGET: ${{ vars.CORPUS_TARGET_OVERRIDE || inputs.target_per_worker }}
+          # 0 is off. When set, every worker stops once the collection holds
+          # this many points, and the build ends there, not at per-lane quotas.
+          STOP_AT_TOTAL: ${{ vars.CORPUS_STOP_AT_TOTAL || '0' }}
           BUILD: ${{ inputs.build }}
           CATEGORIES: ${{ inputs.categories }}
           TOPICS: ${{ inputs.topics }}
           MAX_SECONDS: ${{ inputs.max_seconds }}
           WORKER: ${{ matrix.worker }}
           WORKERS: ${{ inputs.workers }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          QDRANT_URL: ${{ secrets.QDRANT_URL }}
+          QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
         run: |
+          # The topics file must be something that ships with this commit;
+          # an absolute or parent path could read arbitrary runner files
+          # while the job holds production secrets.
+          if [ -n "$TOPICS" ]; then
+            case "$TOPICS" in
+              /*|*..*) echo "::error title=Bad topics path::must be repository-relative, got '$TOPICS'"; exit 1 ;;
+            esac
+            [ -f "$TOPICS" ] || { echo "::error title=Missing topics file::$TOPICS is not in the checkout"; exit 1; }
+          fi
+          [[ "$WORKERS" =~ ^[0-9]+$ ]] || { echo "::error title=Bad workers::got '$WORKERS'"; exit 1; }
+          [[ "$MAX_SECONDS" =~ ^[0-9]+$ ]] || { echo "::error title=Bad max_seconds::got '$MAX_SECONDS'"; exit 1; }
           set +e
           python cloud_corpus.py --no-archive \
             --worker "$WORKER" --workers "$WORKERS" \
             --target "$TARGET" --build "$BUILD" \
             --categories "$CATEGORIES" \
             --topics "$TOPICS" \
-            --threads 2 --max-seconds "$MAX_SECONDS"
+            --threads 2 --max-seconds "$MAX_SECONDS" \
+            --stop-at-total "$STOP_AT_TOTAL"
           code=$?
           set -e
           # 75 (EX_TEMPFAIL) means the worker ran its window, saved its cursor,
@@ -151,7 +215,78 @@ jobs:
           # multi-run build -- treat it as a note so a red job always means
           # something actually broke.
           if [ "$code" = "75" ]; then
-            echo "::notice title=Resume needed::Worker $WORKER saved its cursor; rerun this build to continue"
+            echo "::notice title=Resume needed::Worker $WORKER stopped with shards still queued; this build restarts itself"
+            # The resume job below counts these flags to decide whether to restart.
+            echo "$WORKER" > resume-flag.txt
+            echo "resume=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           exit "$code"
+      - name: Flag this worker as having work left
+        if: steps.crawl.outputs.resume == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: resume-${{ matrix.worker }}
+          path: resume-flag.txt
+          retention-days: 1
+
+  # Restarts this build whenever any worker stopped with shards still queued,
+  # with no person and no agent in the loop. GitHub lets a workflow_dispatch run
+  # start the next one with its own token, so restarts cost nobody's usage and
+  # happen overnight. Each repo's half restarts itself; both resume from the same
+  # checkpoints, so they do not need to restart in step.
+  #
+  # Stops when no worker has work left, when max_resumes is reached, when a
+  # person cancels the run (cancelled() is then true, so this job is skipped),
+  # or when the repo variable CRAWL_AUTORESUME is set to "off".
+  #
+  # A worker that CRASHED raises no flag, deliberately: a crash that repeats
+  # would otherwise relaunch the build up to the cap. It is still restarted with
+  # everyone else whenever any other worker has work left, and resumes from its
+  # last saved cursor; only if a crash is the last unfinished work does the
+  # build stop and wait for a person.
+  resume:
+    needs: build
+    if: ${{ !cancelled() && vars.CRAWL_AUTORESUME != 'off' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Restart if any worker has work left
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          REF: ${{ github.ref_name }}
+          COUNT: ${{ inputs.resume_count }}
+          MAX: ${{ inputs.max_resumes }}
+          BUILD: ${{ inputs.build }}
+          TARGET: ${{ inputs.target_per_worker }}
+          CATEGORIES: ${{ inputs.categories }}
+          TOPICS: ${{ inputs.topics }}
+          MAX_SECONDS: ${{ inputs.max_seconds }}
+          WORKERS: ${{ inputs.workers }}
+          FIRST: ${{ inputs.first_worker }}
+          LANES: ${{ inputs.lanes }}
+        run: |
+          left=$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts?per_page=100" \
+                 --jq '[.artifacts[].name | select(startswith("resume-"))] | length')
+          count=${COUNT:-0}
+          max=${MAX:-8}
+          echo "workers with work left: $left | restarts so far: $count of $max"
+          if [ "$left" -eq 0 ]; then
+            echo "::notice title=Build finished::no worker in this run has work left"
+            exit 0
+          fi
+          if [ "$count" -ge "$max" ]; then
+            echo "::warning title=Restart cap reached::$left workers still have work after $count restarts; rerun this build by hand to continue"
+            exit 0
+          fi
+          next=$((count + 1))
+          gh workflow run corpus-10m.yml --repo "$REPO" --ref "$REF" \
+            -f build="$BUILD" -f target_per_worker="$TARGET" \
+            -f categories="$CATEGORIES" -f topics="$TOPICS" \
+            -f max_seconds="$MAX_SECONDS" -f workers="$WORKERS" \
+            -f first_worker="$FIRST" -f lanes="$LANES" \
+            -f resume_count="$next" -f max_resumes="$max"
+          echo "::notice title=Restarted::dispatched restart $next of $max"

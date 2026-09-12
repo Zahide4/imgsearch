@@ -34,6 +34,7 @@ from huggingface_hub import CommitOperationAdd, HfApi, hf_hub_download
 from huggingface_hub.errors import HfHubHTTPError
 from huggingface_hub.errors import EntryNotFoundError
 from qdrant_client import QdrantClient, models
+from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 
 from ingest import COMMONS, license_ok, _clean
 from push_qdrant import point_id, license_class
@@ -356,6 +357,68 @@ async def batches_as_fetched(client, rows, limiter, size, encode_webp):
                 task.cancel()
 
 
+# Qdrant sits behind a proxy on a busy box, and a connection can drop halfway
+# through a reply ("peer closed connection without sending complete message
+# body"). One such blip killed worker 45 of build 10m-0911 an hour into its
+# window, and a crashed worker raises no resume flag, so it sat idle until the
+# next restart. Every Qdrant call here is safe to repeat: count, retrieve and
+# the checkpoint load only read, the payload index and the state collection are
+# idempotent, and upserts rewrite points under deterministic ids. About two
+# minutes of retrying, then the error stands, as it always did.
+QDRANT_RETRY_DELAYS = (2, 4, 8, 16, 32, 60)
+
+
+def transient_qdrant_error(exc):
+    """A dropped connection, a timeout or a server-side failure: worth another try."""
+    if isinstance(exc, (ResponseHandlingException, httpx.TransportError)):
+        return True
+    if isinstance(exc, UnexpectedResponse):
+        return exc.status_code is not None and (exc.status_code >= 500 or exc.status_code == 429)
+    return False
+
+
+def with_retries(call, what, sleep=time.sleep, delays=QDRANT_RETRY_DELAYS):
+    """Runs `call`, retrying transient Qdrant errors; any other error raises at once."""
+    for attempt, delay in enumerate(delays):
+        try:
+            return call()
+        except Exception as exc:
+            if not transient_qdrant_error(exc):
+                raise
+            print(f'qdrant {what} failed ({type(exc).__name__}: {str(exc)[:120]}); '
+                  f'retry {attempt + 1}/{len(delays)} in {delay}s', flush=True)
+            sleep(delay)
+    return call()
+
+
+def goal_met(size, stop_at):
+    """True once the whole collection holds `stop_at` points. 0 disables it."""
+    return bool(stop_at) and size >= stop_at
+
+
+def collection_size(qc):
+    """Points in the whole collection -- every build's, not just this one's.
+    Approximate, which is fine for a stopping line: each worker overshoots it
+    by at most one flush."""
+    return with_retries(lambda: qc.get_collection(COLLECTION).points_count or 0, 'collection size')
+
+
+def exit_code(done, target, queue, goal_reached=False):
+    """75 (EX_TEMPFAIL) only when the worker stopped with jobs still queued.
+
+    The workflow restarts a build whenever a worker exits 75, so 75 has to mean
+    "paused, more to do" and nothing else. A worker whose queue is empty has
+    spent every shard in its bin -- capped, exhausted or abandoned -- and is
+    finished even if it indexed fewer rows than its target. The first version
+    exited 75 for that too, which would have made a self-restarting build keep
+    relaunching finished workers until its restart cap ran out.
+    """
+    if goal_reached:
+        # The whole corpus is done, whatever this worker's own share says.
+        return 0
+    return 75 if done < target and queue else 0
+
+
 def clean_url(url):
     p = urlsplit(url)
     return urlunsplit((p.scheme, p.netloc, p.path, '', ''))
@@ -386,6 +449,33 @@ def metadata(page, end=None):
         'description': _clean(meta.get('ImageDescription', {}).get('value', ''))[:400],
         'tags': _clean(meta.get('Categories', {}).get('value', '')).replace('|', ', ')[:300],
     }
+
+
+# Commons sometimes answers 200 with an error body instead of an HTTP error,
+# so request()'s 429/5xx retry never sees it. internal_api_error_* means a
+# backend hiccup -- internal_api_error_DBConnectionError killed worker 37 of
+# build 10m-0911 2.5h into its window, and cirrussearch-too-busy-error (the
+# search backend overloaded) killed worker 47 in restart 1. Worth a wait and
+# a retry, not a dead worker. Bounded: past COMMONS_MAX_BLIPS straight blips
+# the error stands, so a truly broken query still dies loudly instead of
+# burning its whole window.
+COMMONS_MAX_BLIPS = 10
+
+
+def transient_commons_error(code):
+    """True when a Commons error-JSON code is a backend blip worth retrying."""
+    if not code:
+        return False
+    if code in ('maxlag', 'ratelimited', 'readonly',
+                'cirrussearch-too-busy-error'):
+        return True
+    return code.startswith('internal_api_error')
+
+
+def drop_label(job):
+    """Short shard name for the drop line. Range shards carry start/end (which
+    wins when present); topic shards carry topic/lic/band."""
+    return job.get('start', {k: job.get(k) for k in ('topic', 'lic', 'band')})
 
 
 async def request(client, url, **kwargs):
@@ -632,7 +722,7 @@ async def run(args):
         hf = HfApi(token=os.environ['HF_TOKEN'])
         repo = os.environ['HF_REPO']
     if args.no_archive:
-        checkpoint.ensure()
+        with_retries(checkpoint.ensure, 'checkpoint ensure')
     # No cloud_inference: sparse vectors are built here, so this same code
     # works against a self-hosted instance, which has no inference service.
     qc = None
@@ -645,7 +735,8 @@ async def run(args):
         for field, schema in [('build_id', models.PayloadSchemaType.KEYWORD),
                              ('worker', models.PayloadSchemaType.INTEGER),
                              ('safety', models.PayloadSchemaType.FLOAT)]:
-            qc.create_payload_index(COLLECTION, field, field_schema=schema, wait=True)
+            with_retries(lambda f=field, s=schema: qc.create_payload_index(
+                COLLECTION, f, field_schema=s, wait=True), 'create_payload_index')
     checkpoint_key = f'checkpoints/{args.build}-{args.workers}-{args.worker}.json'
     categories = [c.strip() for c in (args.categories or '').split(',') if c.strip()]
     topics = []
@@ -665,7 +756,7 @@ async def run(args):
 
     def read_checkpoint():
         if args.no_archive:
-            return checkpoint.load(checkpoint_key)
+            return with_retries(lambda: checkpoint.load(checkpoint_key), 'checkpoint load')
         if args.no_embed:
             from botocore.exceptions import ClientError
             try:
@@ -727,10 +818,16 @@ async def run(args):
     if qc is not None:
         flt = models.Filter(must=[models.FieldCondition(key='build_id', match=models.MatchValue(value=args.build)),
                                   models.FieldCondition(key='worker', match=models.MatchValue(value=args.worker))])
-        done = qc.count(COLLECTION, count_filter=flt, exact=True).count
+        done = with_retries(lambda: qc.count(COLLECTION, count_filter=flt, exact=True).count, 'count')
     if done >= args.target:
         print(f'already complete: {done}/{args.target}', flush=True)
         return
+    if qc is not None and args.stop_at_total:
+        size = collection_size(qc)
+        if goal_met(size, args.stop_at_total):
+            print(f'GOAL: the collection already holds {size:,} >= {args.stop_at_total:,}; '
+                  f'nothing to do', flush=True)
+            return
     # Jobs queued is the worker's whole future: 0 here means it will skip
     # everything and exit green within minutes (inherited an exhausted
     # checkpoint, or a category with nothing in its shards). Loud now so a
@@ -757,6 +854,8 @@ async def run(args):
     archive = Archive(root, hf, repo)
     pending_points = []
     manifest_rows = []
+    # Set by save() once the collection reaches --stop-at-total.
+    goal = {'reached': False}
     manifest_seq = resume_seq
     staged_ids = set()
     start_time, pages, failed, empty = time.monotonic(), 0, 0, 0
@@ -805,13 +904,19 @@ async def run(args):
                 if archive_op:
                     ops.append(archive_op)
             for i in range(0, len(pending_points), 128):
-                qc.upsert(COLLECTION, points=pending_points[i:i + 128], wait=True)
+                batch = pending_points[i:i + 128]
+                with_retries(lambda: qc.upsert(COLLECTION, points=batch, wait=True), 'upsert')
             pending_points.clear()
         staged_ids.clear()
         state = json.dumps({'queue': list(queue), 'uploaded': done, 'done': done,
                             'manifest_seq': manifest_seq, 'pages': pages}).encode()
         if args.no_archive:
-            checkpoint.save(checkpoint_key, json.loads(state))
+            with_retries(lambda: checkpoint.save(checkpoint_key, json.loads(state)), 'checkpoint save')
+            # After the save, so a worker that stops here leaves nothing
+            # unsaved. Once per flush: cheap, and at most one flush of
+            # overshoot per worker.
+            if qc is not None and args.stop_at_total:
+                goal['reached'] = goal_met(collection_size(qc), args.stop_at_total)
             return
         if args.no_embed:
             storage.client().put_object(Bucket=storage.BUCKET, Key=checkpoint_key,
@@ -835,7 +940,9 @@ async def run(args):
                 time.sleep(wait)
 
     async with httpx.AsyncClient(headers={'User-Agent': UA}, follow_redirects=True) as client:
-        while queue and done < args.target and time.monotonic() - start_time < args.max_seconds:
+        blips = 0  # consecutive transient Commons error-JSONs; reset on any good page
+        while (queue and done < args.target and not goal['reached']
+               and time.monotonic() - start_time < args.max_seconds):
             job = queue[0]
             if 'topic' in job:
                 params = params_for_search(job['topic'], job['lic'], job['band'], job['continue'])
@@ -853,6 +960,18 @@ async def run(args):
                 if code in ('maxlag', 'ratelimited'):
                     await asyncio.sleep(30)
                     continue
+                if transient_commons_error(code):
+                    # Backend blip, not a bad query: wait it out, but not
+                    # forever -- past the cap the error stands and the worker
+                    # dies loudly instead of burning its window one minute at
+                    # a time.
+                    blips += 1
+                    if blips > COMMONS_MAX_BLIPS:
+                        raise RuntimeError(f"Commons API error: {code}")
+                    print(f'worker {args.worker}: Commons blip {code} '
+                          f'({blips}/{COMMONS_MAX_BLIPS}), sleeping 60s', flush=True)
+                    await asyncio.sleep(60)
+                    continue
                 if code == 'cirrussearch-offset-too-large':
                     # The search API refuses offsets past 10,000. That is the
                     # shard exhausted, not a failure: licence and width shards
@@ -862,20 +981,23 @@ async def run(args):
                     print(f'worker {args.worker}: shard depth reached for '
                           f'{job.get("topic")!r} / {job.get("lic")!r}', flush=True)
                     queue.popleft()
+                    blips = 0  # fresh job, fresh streak
                     save()
                     continue
                 if code == 'urlparamnormal':
                     # One unrepresentable cursor should cost a job, not a
                     # worker. Drop this job, keep whatever it already indexed,
                     # and move to the next one. Job shape differs by mode
-                    # (ranges have start/end, topic shards have topic/licence).
-                    label = job.get('start', {k: job.get(k) for k in ('topic', 'licence', 'band')})
+                    # (ranges have start/end, topic shards have topic/lic/band).
+                    label = drop_label(job)
                     print(f'worker {args.worker}: dropping job '
                           f'{label!r} after {code}', flush=True)
                     queue.popleft()
+                    blips = 0  # fresh job, fresh streak
                     save()
                     continue
                 raise RuntimeError(f"Commons API error: {code}")
+            blips = 0  # a clean page clears the blip streak
             rows = [row for p in data.get('query', {}).get('pages', []) if (row := metadata(p, end))]
             rows = list({row['image_id']: row for row in rows}.values())
             if rows:
@@ -885,9 +1007,9 @@ async def run(args):
                 # earlier and holds no database credentials.
                 seen = set()
                 if qc is not None:
-                    seen = {str(p.id) for p in qc.retrieve(
-                        COLLECTION, ids=[point_id(r['image_id']) for r in rows],
-                        with_payload=False, with_vectors=False)}
+                    wanted_ids = [point_id(r['image_id']) for r in rows]
+                    seen = {str(p.id) for p in with_retries(lambda: qc.retrieve(
+                        COLLECTION, ids=wanted_ids, with_payload=False, with_vectors=False), 'retrieve')}
                 rows = [r for r in rows if point_id(r['image_id']) not in seen | staged_ids][:args.target - done]
             produced = 0
             fetched = 0
@@ -1062,16 +1184,22 @@ async def run(args):
             # actually matters; this is a second, softer brake.
             await asyncio.sleep(0.3)
         save()
-    if done < args.target:
+    if goal['reached']:
+        print(f'GOAL: the collection reached {args.stop_at_total:,}; this worker stops at '
+              f'{done}/{args.target} of its own share. Nothing to resume.', flush=True)
+    if exit_code(done, args.target, queue, goal['reached']) == 75:
         # Not a failure. The worker ran out of wall clock before its quota and
         # has saved its cursor; the next run resumes from there. A 10M build is
         # six runs of twenty workers and MOST of those jobs end this way, so
         # raising here painted 120 jobs red and would have buried the ones that
         # broke for real. 75 is EX_TEMPFAIL -- "try again later" -- and the
         # workflow treats it as a note rather than an error.
-        print(f'INCOMPLETE: {done}/{args.target} indexed, cursor saved. '
-              f'Rerun this build to resume.', flush=True)
+        print(f'INCOMPLETE: {done}/{args.target} indexed, {len(queue)} jobs left, '
+              f'cursor saved. The build restarts itself to resume.', flush=True)
         raise SystemExit(75)
+    if done < args.target and not goal['reached']:
+        print(f'EXHAUSTED: {done}/{args.target} indexed -- every job in this '
+              f"worker's share is spent, so there is nothing to resume.", flush=True)
     if args.no_embed:
         print(f'COMPLETE: {done} images in the bucket, manifest written. '
               f'Run embed_manifest.py --build {args.build} on a GPU next.', flush=True)
@@ -1121,13 +1249,16 @@ if __name__ == '__main__':
                         'generator=categorymembers crawl (the Quality/Featured/'
                         'Valued layer). Empty means the default filename-range '
                         'allimages walk. Sharded by sortkey prefix across workers.')
-    p.add_argument('--shard-depth', type=int, default=800,
+    p.add_argument('--shard-depth', type=int, default=1600,
                    help='stop a (topic, licence, width) shard after this many '
                         'indexed rows. Replaces the relevance gate as the depth '
                         'control: search is relevance-ordered, so a cap keeps '
                         'the good part of every topic without paying to fetch '
-                        'and embed the tail. 800 x 20,848 shards is ~9M '
-                        'addressable; 0 disables the cap.')
+                        'and embed the tail. 1600, not 800: measured per shard '
+                        'across 40 topics in 8 hit-count strata, 800 held a '
+                        'clean-only build to ~8.0M -- capped, not short of '
+                        'supply, with ~193M clean in the list -- and 1600 '
+                        'reaches ~11.9M. 0 disables the cap.')
     p.add_argument('--barren-patience', type=int, default=25,
                    help='consecutive pages indexing nothing before a shard is '
                         'abandoned. Zero-yield pages are cheap (0.93s measured) '
@@ -1144,6 +1275,13 @@ if __name__ == '__main__':
     # the forward pass can use just adds contention.
     p.add_argument('--threads', type=int, default=2)
     p.add_argument('--max-seconds', type=int, default=16200)
+    p.add_argument('--stop-at-total', type=int, default=0,
+                   help='stop every worker once the whole collection holds this '
+                        'many points, whatever its own --target says, and exit 0 '
+                        'so the build does not restart. 0 disables it. Lets lanes '
+                        'run past a per-lane quota without overshooting the '
+                        'corpus goal: a quota let fast lanes stop early and the '
+                        'slow ones set the finish.')
     p.add_argument('--no-archive', action='store_true',
                    help='embed on this runner and keep nothing: no bucket, no '
                         'HuggingFace, no derivative stored anywhere. The browser '
