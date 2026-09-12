@@ -4,6 +4,17 @@ The public application runs `server/` on Render. Query text is embedded there;
 Qdrant Cloud stores vectors and metadata. Browsers load images through wsrv.nl.
 `server.py` and `static_site/` are older local/browser experiments, not the Render app.
 
+## 4K renditions (added 2026-09-12)
+
+`/api/search` results carry `rendition_url`: a Wikimedia standard-bucket 3840px
+thumbnail built from `thumb_origin` (or from `full_url` when the thumb is
+missing). Present only when `width > 3840`; smaller originals, animated
+GIF/SVG and non-Wikimedia rows get an empty string and the client uses
+`full_url`. Wikimedia 400s on non-standard widths and upscales when asked for
+3840 of a smaller original, so there is exactly one bucket and one condition.
+Computed at query time — no Qdrant payload change, no storage, nothing to
+backfill (deliberate while the 10M build is writing).
+
 
 ## The vector database (as of 2026-09-10)
 

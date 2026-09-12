@@ -180,6 +180,62 @@ class SearchTests(unittest.IsolatedAsyncioTestCase):
         r=await self.client.get('/api/search',params={'q':'!!!'})
         self.assertEqual(r.json()['results'],[])
 
+class RenditionUrlTests(unittest.TestCase):
+    """The 4K rendition lives on Wikimedia's standard buckets, because
+    hotlinking any other width is a 400. Smaller originals keep the original:
+    asking for the 3840 bucket upscales them into a bigger, lesser file."""
+
+    def test_swaps_the_bucket_width_on_wikimedia_thumbs(self):
+        payload = {'width': 8368,
+                   'thumb_origin': 'https://thumb.wikimedia.org/wikipedia/commons/thumb/d/dc/Forest.jpg/500px-Forest.jpg',
+                   'full_url': 'https://upload.wikimedia.org/wikipedia/commons/d/dc/Forest.jpg'}
+        self.assertEqual(api.rendition_url(payload),
+            'https://thumb.wikimedia.org/wikipedia/commons/thumb/d/dc/Forest.jpg/3840px-Forest.jpg')
+
+    def test_small_originals_stay_original(self):
+        payload = {'width': 2400,
+                   'thumb_origin': 'https://thumb.wikimedia.org/wikipedia/commons/thumb/d/dc/X.jpg/500px-X.jpg'}
+        self.assertEqual(api.rendition_url(payload), '')
+
+    def test_missing_width_stays_original(self):
+        self.assertEqual(api.rendition_url({'width': None, 'thumb_origin': 'https://thumb.wikimedia.org/x'}), '')
+
+    def test_builds_from_the_original_when_no_thumb_origin(self):
+        payload = {'width': 6000, 'thumb_origin': '',
+                   'full_url': 'https://upload.wikimedia.org/wikipedia/commons/a/ab/Name%20X.jpg'}
+        self.assertEqual(api.rendition_url(payload),
+            'https://upload.wikimedia.org/wikipedia/commons/thumb/a/ab/Name%20X.jpg/3840px-Name%20X.jpg')
+
+    def test_keeps_a_lossy_page_prefix(self):
+        payload = {'width': 6000,
+                   'thumb_origin': 'https://thumb.wikimedia.org/wikipedia/commons/thumb/1/2/Scan.tif/lossy-page1-500px-Scan.tif.jpg'}
+        self.assertEqual(api.rendition_url(payload),
+            'https://thumb.wikimedia.org/wikipedia/commons/thumb/1/2/Scan.tif/lossy-page1-3840px-Scan.tif.jpg')
+
+    def test_a_filename_containing_px_is_not_the_width_token(self):
+        payload = {'width': 6000,
+                   'thumb_origin': 'https://thumb.wikimedia.org/wikipedia/commons/thumb/d/dc/1920px-Banner.jpg/500px-1920px-Banner.jpg'}
+        self.assertEqual(api.rendition_url(payload),
+            'https://thumb.wikimedia.org/wikipedia/commons/thumb/d/dc/1920px-Banner.jpg/3840px-1920px-Banner.jpg')
+
+    def test_skips_animated_and_vector_renditions(self):
+        thumb = 'https://thumb.wikimedia.org/wikipedia/commons/thumb/a/ab/'
+        self.assertEqual(api.rendition_url({'width': 6000, 'thumb_origin': thumb + 'Anim.gif/500px-Anim.gif'}), '')
+        self.assertEqual(api.rendition_url({'width': 6000, 'thumb_origin': thumb + 'Diagram.svg/500px-Diagram.svg.png'}), '')
+        self.assertEqual(api.rendition_url({'width': 6000,
+            'full_url': 'https://upload.wikimedia.org/wikipedia/commons/a/ab/Anim.gif'}), '')
+
+    def test_ignores_non_wikimedia_sources(self):
+        payload = {'width': 6000, 'thumb_origin': 'https://wsrv.nl/?url=x',
+                   'full_url': 'https://live.staticflickr.com/1/2/x.jpg'}
+        self.assertEqual(api.rendition_url(payload), '')
+
+    def test_results_carry_the_field(self):
+        hit = SimpleNamespace(score=0.5, payload={'image_id': 'commons:1', 'title': 'X', 'width': 8368,
+            'thumb_origin': 'https://thumb.wikimedia.org/wikipedia/commons/thumb/d/dc/Forest.jpg/500px-Forest.jpg'})
+        self.assertIn('rendition_url', api.result_from(hit))
+
+
 class RefusalTests(unittest.IsolatedAsyncioTestCase):
     """Adult queries get a hard refusal, never a result set. The embed tower
     is absent here (S['sess'] is None), which also proves the fail-open and
