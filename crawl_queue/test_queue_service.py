@@ -214,7 +214,9 @@ class TestQueueClient(QueueServerTestCase):
         client = self._client('client-w0')
         try:
             job = client.claim()
-            self.assertEqual(job['unit'], UNIT)
+            # claim() returns the unit itself plus the queue's bookkeeping.
+            self.assertEqual({k: job[k] for k in UNIT}, UNIT)
+            self.assertIsNotNone(job['id'])
             self.assertTrue(client.progress(job['id'], {'page': 2}, 5))
             self.assertTrue(client.complete(job['id']))
             self.assertIsNone(client.claim())
