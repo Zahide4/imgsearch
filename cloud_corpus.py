@@ -648,28 +648,28 @@ def met_metadata(obj):
 
 async def met_page(client, job):
     ids = job.get('ids') or []
-    # The Met's API allows ~80 requests/second per IP; 20 workers at 3
-    # concurrent objects each sit at ~60/s, and 429s get their own backoff.
-    # 8 concurrent per worker (the first attempt) was 160/s and every single
-    # object was rejected, completing 1,600 units with zero rows.
-    sem = asyncio.Semaphore(3)
-
-    async def one(object_id):
-        async with sem:
-            for attempt in range(4):
-                try:
-                    r = await client.get(f'{MET_API}/objects/{object_id}', timeout=45)
-                    if r.status_code == 429:
-                        await asyncio.sleep(2 + 3 * attempt)
-                        continue
-                    if r.status_code != 200:
-                        return None
-                    return met_metadata(r.json())
-                except Exception:
-                    await asyncio.sleep(1 + attempt)
-            return None
-
-    rows = [row for row in await asyncio.gather(*(one(i) for i in ids)) if row]
+    # Measured directly against the API: ~86 rapid requests from one IP then
+    # 403 for everything, recovering after ~75s; paced at 1.2s apart it never
+    # blocks. Every runner has its own IP, so pacing per worker is enough --
+    # the first version fetched 100 objects at once and every unit after the
+    # first returned instantly with nothing.
+    rows = []
+    for object_id in ids:
+        for attempt in range(4):
+            try:
+                r = await client.get(f'{MET_API}/objects/{object_id}', timeout=45)
+                if r.status_code in (403, 429):
+                    await asyncio.sleep(45 + 20 * attempt)
+                    continue
+                if r.status_code != 200:
+                    break
+                row = met_metadata(r.json())
+                if row:
+                    rows.append(row)
+                break
+            except Exception:
+                await asyncio.sleep(2 + attempt)
+        await asyncio.sleep(1.2)
     return rows, None
 
 
