@@ -1,0 +1,19 @@
+name: Probe source hosts from a runner
+on:
+  workflow_dispatch:
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Curl the sources from this runner IP
+        run: |
+          check() { printf '%-55s ' "$1"; curl -s -o /dev/null -w '%{http_code} %{time_total}s\n' --max-time 30 -A "ImgSearch/0.2 (https://github.com/Zahide4/imgsearch)" "$1"; }
+          check "https://collectionapi.metmuseum.org/public/collection/v1/objects/436535"
+          check "https://images.metmuseum.org/CRDImages/ep/web-large/DP-42549-001.jpg"
+          check "https://api.wellcomecollection.org/catalogue/v2/images?query=anatomy&pageSize=1"
+          check "https://iiif.wellcomecollection.org/image/L0011861/full/400,/0/default.jpg"
+          check "https://api.artic.edu/api/v1/artworks/4?fields=id,title,image_id"
+          check "https://www.artic.edu/iiif/2/2d484387-2509-5e8e-2c43-22f9981972eb/full/400,/0/default.jpg"
+          check "https://api.si.edu/openaccess/api/v1.0/search?q=test&api_key=DEMO_KEY"
+          check "https://images-api.nasa.gov/search?q=earthrise&media_type=image"
