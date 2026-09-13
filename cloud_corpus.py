@@ -460,6 +460,13 @@ _ov_token = {'value': None, 'expires': 0.0}
 
 
 def openverse_token():
+    """A bearer for the authenticated tier, or None to run anonymously.
+
+    Token-endpoint failures are transient far more often than fatal -- two
+    workers died on a single httpx.ReadTimeout against it -- so retry with
+    backoff, then fall back to the anonymous tier for this page rather than
+    taking the worker down.
+    """
     if os.environ.get('OPENVERSE_TOKEN'):
         return os.environ['OPENVERSE_TOKEN']
     cid = os.environ.get('OPENVERSE_CLIENT_ID')
@@ -468,14 +475,25 @@ def openverse_token():
         return None
     if _ov_token['value'] and time.time() < _ov_token['expires'] - 60:
         return _ov_token['value']
-    r = httpx.post(f'{OPENVERSE_API}/auth_tokens/token/', timeout=30,
-                   data={'client_id': cid, 'client_secret': secret,
-                         'grant_type': 'client_credentials'})
-    r.raise_for_status()
-    body = r.json()
-    _ov_token.update(value=body['access_token'],
-                     expires=time.time() + int(body.get('expires_in') or 86400))
-    return _ov_token['value']
+    for attempt in range(4):
+        try:
+            r = httpx.post(f'{OPENVERSE_API}/auth_tokens/token/', timeout=30,
+                           data={'client_id': cid, 'client_secret': secret,
+                                 'grant_type': 'client_credentials'})
+            if r.status_code in (429, 500, 502, 503, 504):
+                time.sleep(5 * (attempt + 1))
+                continue
+            r.raise_for_status()
+            body = r.json()
+            _ov_token.update(value=body['access_token'],
+                             expires=time.time() + int(body.get('expires_in') or 86400))
+            return _ov_token['value']
+        except Exception as exc:
+            print(f'openverse token attempt {attempt + 1} failed: '
+                  f'{type(exc).__name__}', flush=True)
+            time.sleep(5 * (attempt + 1))
+    print('openverse token unavailable; continuing anonymously', flush=True)
+    return None
 
 
 async def openverse_page(client, name, page):
