@@ -50,7 +50,10 @@ permissions:
   contents: read
 
 concurrency:
-  group: celeb-crawl
+  # Per build: a shared group let one phase's dispatch cancel another phase's
+  # pending run (GitHub cancels older queued runs in the same group), which is
+  # how the NASA run vanished before it ever started.
+  group: celeb-crawl-${{ github.event.inputs.build || github.run_id }}
   cancel-in-progress: false
 
 jobs:
