@@ -545,6 +545,182 @@ def openverse_metadata(item, name):
     }
 
 
+# --- NASA, the Met and Wellcome: the special-collection sources ------------
+# Each follows the same contract as the Openverse fetchers: one page per
+# queue unit, returning (rows, continuation), or (None, None) when the unit
+# is spent. Licences are filtered here as well as at seed time.
+
+NASA_API = 'https://images-api.nasa.gov'
+MET_API = 'https://collectionapi.metmuseum.org/public/collection/v1'
+WELLCOME_API = 'https://api.wellcomecollection.org/catalogue/v2'
+SPECIAL_SOURCES = ('openverse', 'nasa', 'met', 'wellcome')
+
+
+def nasa_metadata(item):
+    data = (item.get('data') or [{}])[0]
+    nasa_id = data.get('nasa_id') or ''
+    if not nasa_id:
+        return None
+    links = [l for l in (item.get('links') or []) if l.get('href')]
+    medium = next((l for l in links if l.get('render') == 'image'), links[0] if links else None)
+    if not medium:
+        return None
+    thumb = medium['href']
+    # Asset URLs share a naming convention; ~orig is the archival file.
+    full = thumb.replace('~medium.', '~orig.').replace('~small.', '~orig.').replace('~thumb.', '~orig.')
+    w, h = int(medium.get('width') or 0), int(medium.get('height') or 0)
+    if w and h and (min(w, h) < 320 or max(w, h) / min(w, h) > 8):
+        return None
+    return {
+        'image_id': f"nasa:{nasa_id}",
+        'title': clean_text(data.get('title') or '')[:300],
+        'creator': 'NASA',
+        'license': 'Public domain', 'license_class': 'public_domain',
+        'license_url': '',
+        'source_url': f'https://images.nasa.gov/details-{nasa_id}',
+        'full_url': full, 'thumb': thumb, 'thumb_origin': thumb,
+        'width': w, 'height': h, 'mime': '', 'sha1': '',
+        'description': clean_text(data.get('description') or '')[:400],
+        'tags': ', '.join((data.get('keywords') or [])[:20])[:300],
+    }
+
+
+async def nasa_page(client, job):
+    page = (job.get('continue') or {}).get('page') or job.get('page') or 1
+    params = {'q': job['query'], 'media_type': 'image', 'page_size': 100, 'page': page}
+    r = None
+    for attempt in range(4):
+        r = await client.get(f'{NASA_API}/search', params=params, timeout=60)
+        if r.status_code in (429, 500, 502, 503, 504):
+            await asyncio.sleep(10 * (attempt + 1))
+            continue
+        break
+    if r is None or r.status_code != 200:
+        return None, None
+    collection = r.json().get('collection') or {}
+    items = collection.get('items') or []
+    rows = [row for item in items if (row := nasa_metadata(item))]
+    total = int((collection.get('metadata') or {}).get('total_hits') or 0)
+    max_pages = int(job.get('max_pages') or 30)
+    more = bool(items) and page < max_pages and page * 100 < total
+    return rows, ({'page': page + 1} if more else None)
+
+
+def met_metadata(obj):
+    if not obj.get('isPublicDomain'):
+        return None
+    full = obj.get('primaryImage') or ''
+    if not full:
+        return None
+    small = obj.get('primaryImageSmall') or full
+    return {
+        'image_id': f"met:{obj.get('objectID')}",
+        'title': clean_text(obj.get('title') or '')[:300],
+        'creator': clean_text(obj.get('artistDisplayName') or obj.get('culture') or '')[:180],
+        'license': 'CC0 1.0', 'license_class': 'public_domain',
+        'license_url': 'https://creativecommons.org/publicdomain/zero/1.0/',
+        'source_url': obj.get('objectURL') or '',
+        'full_url': full, 'thumb': small, 'thumb_origin': small,
+        'width': 0, 'height': 0, 'mime': '', 'sha1': '',
+        'description': '',
+        'tags': ', '.join(x for x in (obj.get('department'), obj.get('objectDate'),
+                                      obj.get('medium')) if x)[:300],
+    }
+
+
+async def met_page(client, job):
+    ids = job.get('ids') or []
+    sem = asyncio.Semaphore(8)
+
+    async def one(object_id):
+        async with sem:
+            try:
+                r = await client.get(f'{MET_API}/objects/{object_id}', timeout=45)
+                if r.status_code != 200:
+                    return None
+                return met_metadata(r.json())
+            except Exception:
+                return None
+
+    rows = [row for row in await asyncio.gather(*(one(i) for i in ids)) if row]
+    return rows, None
+
+
+def wellcome_metadata(result):
+    location = (result.get('locations') or [{}])[0]
+    license_info = location.get('license') or {}
+    lic_id = (license_info.get('id') or '').lower()
+    if lic_id == 'pdm':
+        license_name, license_class = 'Public Domain Mark 1.0', 'public_domain'
+    elif lic_id == 'cc0':
+        license_name, license_class = 'CC0 1.0', 'public_domain'
+    elif lic_id == 'cc-by':
+        license_name = license_info.get('label') or 'CC BY'
+        license_class = 'attribution'
+    else:
+        return None
+    iii = location.get('url') or ''
+    if not iii.endswith('/info.json'):
+        return None
+    base = iii[:-len('/info.json')]
+    thumb = f'{base}/full/400,/0/default.jpg'
+    full = f'{base}/full/1600,/0/default.jpg'
+    source = result.get('source') or {}
+    return {
+        'image_id': f"wellcome:{result.get('id')}",
+        'title': clean_text(source.get('title') or '')[:300],
+        'creator': clean_text(location.get('credit') or 'Wellcome Collection')[:180],
+        'license': license_name, 'license_class': license_class,
+        'license_url': license_info.get('url') or '',
+        'source_url': f"https://wellcomecollection.org/works/{source.get('id') or ''}",
+        'full_url': full, 'thumb': thumb, 'thumb_origin': thumb,
+        'width': 0, 'height': 0, 'mime': '', 'sha1': '',
+        'description': '', 'tags': '',
+    }
+
+
+async def wellcome_page(client, job):
+    page = (job.get('continue') or {}).get('page') or job.get('page') or 1
+    params = {'query': job['query'], 'page': page, 'pageSize': 100}
+    r = None
+    for attempt in range(4):
+        r = await client.get(f'{WELLCOME_API}/images', params=params, timeout=60)
+        if r.status_code in (429, 500, 502, 503, 504):
+            await asyncio.sleep(10 * (attempt + 1))
+            continue
+        break
+    if r is None or r.status_code != 200:
+        return None, None
+    payload = r.json()
+    results = payload.get('results') or []
+    rows = [row for item in results if (row := wellcome_metadata(item))]
+    total = int(payload.get('totalResults') or 0)
+    max_pages = int(job.get('max_pages') or 20)
+    more = bool(results) and page < max_pages and page * 100 < total
+    return rows, ({'page': page + 1} if more else None)
+
+
+async def special_page(client, job):
+    """One page from any non-Commons source. (None, None) means spent."""
+    source = job.get('source')
+    if source == 'openverse':
+        page = (job.get('continue') or {}).get('page', 1)
+        payload = await openverse_page(client, job['name'], page)
+        if payload is None:
+            return None, None
+        rows = [row for item in payload.get('results') or []
+                if (row := openverse_metadata(item, job.get('name', '')))]
+        page_count = int(payload.get('page_count') or page)
+        return rows, ({'page': page + 1} if page < page_count else None)
+    if source == 'nasa':
+        return await nasa_page(client, job)
+    if source == 'met':
+        return await met_page(client, job)
+    if source == 'wellcome':
+        return await wellcome_page(client, job)
+    return None, None
+
+
 # Commons sometimes answers 200 with an error body instead of an HTTP error,
 # so request()'s 429/5xx retry never sees it. internal_api_error_* means a
 # backend hiccup -- internal_api_error_DBConnectionError killed worker 37 of
@@ -1105,20 +1281,15 @@ async def run(args):
             if not queue and not (queue_client and refill()):
                 break
             job = queue[0]
-            if job.get('source') == 'openverse':
-                page = (job.get('continue') or {}).get('page', 1)
-                payload = await openverse_page(client, job['name'], page)
-                if payload is None:
-                    print(f'worker {args.worker}: openverse shard spent for '
-                          f'{job["name"]!r}', flush=True)
+            if job.get('source') in SPECIAL_SOURCES:
+                rows, continuation = await special_page(client, job)
+                if rows is None:
+                    print(f'worker {args.worker}: {job.get("source")} unit spent: '
+                          f'{job.get("query") or job.get("name") or job.get("ids")}',
+                          flush=True)
                     retire()
                     save()
                     continue
-                items = payload.get('results') or []
-                rows = [row for item in items
-                        if (row := openverse_metadata(item, job.get('name', '')))]
-                page_count = int(payload.get('page_count') or page)
-                continuation = {'page': page + 1} if page < page_count else None
                 end = None
                 blips = 0
             else:
