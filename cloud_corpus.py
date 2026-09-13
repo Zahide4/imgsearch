@@ -648,17 +648,26 @@ def met_metadata(obj):
 
 async def met_page(client, job):
     ids = job.get('ids') or []
-    sem = asyncio.Semaphore(8)
+    # The Met's API allows ~80 requests/second per IP; 20 workers at 3
+    # concurrent objects each sit at ~60/s, and 429s get their own backoff.
+    # 8 concurrent per worker (the first attempt) was 160/s and every single
+    # object was rejected, completing 1,600 units with zero rows.
+    sem = asyncio.Semaphore(3)
 
     async def one(object_id):
         async with sem:
-            try:
-                r = await client.get(f'{MET_API}/objects/{object_id}', timeout=45)
-                if r.status_code != 200:
-                    return None
-                return met_metadata(r.json())
-            except Exception:
-                return None
+            for attempt in range(4):
+                try:
+                    r = await client.get(f'{MET_API}/objects/{object_id}', timeout=45)
+                    if r.status_code == 429:
+                        await asyncio.sleep(2 + 3 * attempt)
+                        continue
+                    if r.status_code != 200:
+                        return None
+                    return met_metadata(r.json())
+                except Exception:
+                    await asyncio.sleep(1 + attempt)
+            return None
 
     rows = [row for row in await asyncio.gather(*(one(i) for i in ids)) if row]
     return rows, None
