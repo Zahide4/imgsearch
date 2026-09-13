@@ -1271,8 +1271,15 @@ async def run(args):
 
     def retire_job(job):
         """Tell the queue a unit is spent. The job was popped locally first."""
+        nonlocal reported
         if queue_client and job.get('id') is not None:
             try:
+                # Report the unit's production before completing it. Single-page
+                # units (Met) never hit the mid-unit flush, so without this the
+                # queue counted every one of them as producing zero.
+                if done > reported:
+                    queue_client.progress(job['id'], job.get('continue'), done - reported)
+                    reported = done
                 if not queue_client.complete(job['id']):
                     print(f'worker {args.worker}: queue job {job["id"]} was '
                           f'already reassigned', flush=True)
