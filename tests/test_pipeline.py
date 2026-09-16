@@ -180,6 +180,27 @@ class SearchTests(unittest.IsolatedAsyncioTestCase):
         r=await self.client.get('/api/search',params={'q':'!!!'})
         self.assertEqual(r.json()['results'],[])
 
+    async def test_offset_returns_a_page_and_reports_continuation(self):
+        async def query_points(*args,**kw):
+            self.calls.append(kw)
+            all_points = [SimpleNamespace(score=.12, payload={
+                'image_id': f'commons:{i}', 'title': f'test-{i}',
+                'thumb_origin': 'https://example.com/t.jpg',
+                'full_url': 'https://example.com/original.jpg'}) for i in range(49)]
+            start = kw.get('offset', 0)
+            return SimpleNamespace(points=all_points[start:start + kw['limit']])
+        api.S['qc'].query_points = query_points
+        first=await self.client.get('/api/search',params={'q':'forest','limit':48,'offset':0})
+        self.assertEqual(first.status_code,200)
+        self.assertEqual(len(first.json()['results']),48)
+        self.assertTrue(first.json()['has_more'])
+        second=await self.client.get('/api/search',params={'q':'forest','limit':48,'offset':48})
+        self.assertEqual(second.status_code,200)
+        self.assertEqual(second.json()['results'][0]['id'],'commons:48')
+        self.assertFalse(second.json()['has_more'])
+        self.assertTrue(self.calls[0]['offset'] == 0)
+        self.assertTrue(self.calls[1]['offset'] == 48)
+
 class RenditionUrlTests(unittest.TestCase):
     """The 4K rendition lives on Wikimedia's standard buckets, because
     hotlinking any other width is a 400. Smaller originals keep the original:

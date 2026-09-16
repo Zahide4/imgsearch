@@ -385,6 +385,7 @@ def result_from(hit):
 @app.get('/api/search')
 async def search(request: Request, q: str = Query(..., max_length=300),
                  limit: int = Query(60, ge=1, le=100), license_class: str = '',
+                 offset: int = Query(0, ge=0, le=1000),
                  include_sensitive: bool = Query(
                      False, description='Return images the safety filter would '
                                         'exclude. Medical, anatomical and fine-art '
@@ -396,10 +397,10 @@ async def search(request: Request, q: str = Query(..., max_length=300),
     if set(licenses) - ALLOWED_LICENSES:
         raise HTTPException(400, 'Unknown license filter')
     if not text:
-        return {'results': [], 'ms': 0}
+        return {'results': [], 'ms': 0, 'has_more': False}
     if S['qc'] is None:
         raise HTTPException(503, 'Search is not configured')
-    key = (text, limit, licenses, include_sensitive)
+    key = (text, limit, offset, licenses, include_sensitive)
     cached = S['results'].get(key)
     if cached and time.monotonic() - cached[0] < 120:
         S['results'].move_to_end(key)
@@ -423,11 +424,15 @@ async def search(request: Request, q: str = Query(..., max_length=300),
         print('refused q=%r reason=%s' % (text, reason), flush=True)
         data = {'results': [], 'ms': round((embedded - start) * 1000, 1),
                 'timing': {'embed_ms': round((embedded - start) * 1000, 1), 'ann_ms': 0},
-                'refusal': REFUSAL_MESSAGE}
+                'refusal': REFUSAL_MESSAGE, 'has_more': False}
         remember(S['results'], key, (time.monotonic(), data), 128)
         return data
     flt = search_filter(licenses, include_sensitive)
-    candidates = max(100, limit * 2)
+    # Fetch one extra result so the client can disable Next on the last page.
+    # Qdrant's limit tops out at 100; callers asking for 100 still get the
+    # legacy exact-limit behavior and simply report no continuation.
+    fetch_limit = min(limit + 1, 100)
+    candidates = max(100, (offset + fetch_limit) * 2)
     dense_prefetch = models.Prefetch(
         query=vector, using='image', limit=candidates, filter=flt,
         params=models.SearchParams(
@@ -451,12 +456,13 @@ async def search(request: Request, q: str = Query(..., max_length=300),
                 ),
             ],
             query=models.FusionQuery(fusion=models.Fusion.RRF),
-            limit=limit, with_payload=True,
+            limit=fetch_limit, offset=offset, with_payload=True,
         )).points
     except Exception:
         try:
             hits = (await S['qc'].query_points(
-                COLLECTION, query=vector, using='image', limit=limit,
+                COLLECTION, query=vector, using='image', limit=fetch_limit,
+                offset=offset,
                 with_payload=True, query_filter=flt,
                 params=models.SearchParams(
                     hnsw_ef=128,
@@ -466,7 +472,9 @@ async def search(request: Request, q: str = Query(..., max_length=300),
         except Exception:
             raise HTTPException(503, 'Search is temporarily unavailable. Please try again.')
     end = time.perf_counter()
-    data = {'results': [result_from(hit) for hit in hits], 'ms': round((end-start)*1000, 1),
+    has_more = len(hits) > limit
+    data = {'results': [result_from(hit) for hit in hits[:limit]], 'has_more': has_more,
+            'ms': round((end-start)*1000, 1),
             'timing': {'embed_ms': round((embedded-start)*1000, 1), 'ann_ms': round((end-embedded)*1000, 1)}}
     remember(S['results'], key, (time.monotonic(), data), 128)
     return data
