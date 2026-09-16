@@ -6,6 +6,7 @@ import re
 import string
 import time
 from collections import OrderedDict
+from types import SimpleNamespace
 from pathlib import Path
 
 import numpy as np
@@ -26,7 +27,31 @@ DIM, MAXLEN, PAD_ID = 768, 64, 1
 app = FastAPI(title='imgsearch')
 app.add_middleware(CORSMiddleware, allow_origins=['*'], allow_methods=['GET'], allow_headers=['*'])
 S = {'sess': None, 'tok': None, 'qc': None, 'cache': OrderedDict(),
-     'results': OrderedDict(), 'lock': None, 'stats': (0, 0)}
+     'results': OrderedDict(), 'lock': None, 'stats': (0, 0),
+     'rankings': OrderedDict(), 'anchors': OrderedDict(), 'ranking_failures': OrderedDict(),
+     'building': {}, 'build_slots': None}
+
+# Ranked pages. Paging used to run a fresh fused query for every page, with a
+# candidate pool that grew with the offset: 21 disk-bound queries to read one
+# search to its end, and -- because each pool was different -- pages that could
+# repeat or skip an image at their seams. Now page one is answered exactly as
+# before, and alongside it one cheap query ranks the app's useful depth: eight
+# pages of 48, or 384 results. Only the point ids and scores are kept; every
+# later app page is a slice of that one order plus a
+# payload lookup for just its own points. Page one's points are pinned to the
+# head of the order, so the first page a client saw is never contradicted.
+RANKED_DEPTH = 384
+RANKING_TTL = 600
+RANKING_MAX = 48
+# A failed deep build must not be restarted by every page request. The normal
+# page query remains available during this cooldown.
+RANKING_FAILURE_TTL = 600
+# Deeper rankings run at most this many at a time, so a burst of new searches
+# cannot pile full-depth queries onto Qdrant in front of everyone's page one.
+RANKING_BUILDS = 2
+# How long a deeper page waits for its search's ranking before it gives up and
+# runs the old single-page query instead. Never an error for the client.
+RANKING_WAIT = 25
 _PUNCT = str.maketrans('', '', string.punctuation)
 ALLOWED_LICENSES = {'public_domain', 'attribution', 'share_alike'}
 
@@ -382,6 +407,155 @@ def result_from(hit):
                 thumb=thumb, rendition_url=rendition_url(p), score=round(float(hit.score), 4))
 
 
+def fresh(cache, key, ttl):
+    entry = cache.get(key)
+    if entry is None:
+        return None
+    if time.monotonic() - entry[0] >= ttl:
+        cache.pop(key, None)
+        return None
+    cache.move_to_end(key)
+    return entry[1]
+
+
+async def fused_query(text, vector, flt, offset, limit, with_payload=True):
+    """Dense + BM25 fused by RRF; dense-only if the sparse half fails."""
+    candidates = max(100, (offset + limit) * 2)
+    dense_prefetch = models.Prefetch(
+        query=vector, using='image', limit=candidates, filter=flt,
+        params=models.SearchParams(
+            hnsw_ef=128,
+            quantization=models.QuantizationSearchParams(rescore=True, oversampling=2.0),
+        ),
+    )
+    try:
+        # The BM25 query vector is built by Qdrant Cloud inference. If that is
+        # rate-limited or unavailable, fall back to dense-only rather than
+        # failing the whole request: the semantic half needs no inference and
+        # is the primary ranking signal. Losing exact-name matching degrades
+        # results; returning 503 loses search entirely.
+        return (await S['qc'].query_points(
+            COLLECTION,
+            prefetch=[
+                dense_prefetch,
+                models.Prefetch(
+                    query=sparse_query(text),
+                    using='bm25', limit=candidates, filter=flt,
+                ),
+            ],
+            query=models.FusionQuery(fusion=models.Fusion.RRF),
+            limit=limit, offset=offset, with_payload=with_payload,
+        )).points
+    except Exception:
+        try:
+            return (await S['qc'].query_points(
+                COLLECTION, query=vector, using='image', limit=limit,
+                offset=offset,
+                with_payload=with_payload, query_filter=flt,
+                params=models.SearchParams(
+                    hnsw_ef=128,
+                    quantization=models.QuantizationSearchParams(rescore=True, oversampling=2.0),
+                ),
+            )).points
+        except Exception:
+            raise HTTPException(503, 'Search is temporarily unavailable. Please try again.')
+
+
+async def fast_ranking_query(text, vector, flt):
+    """One inexpensive approximate order for pages after the first.
+
+    Page one keeps full-precision rescoring. Ranking 1,100 later results with
+    that same path made Qdrant read thousands of original vectors from disk and
+    regularly exceeded its 20-second timeout. The app only exposes 384 results,
+    so later pages use the quantized index directly at that depth, with one
+    candidate per result instead of two. The accurate page one is pinned back
+    onto the front by build_ranking.
+    """
+    params = models.SearchParams(
+        hnsw_ef=64,
+        quantization=models.QuantizationSearchParams(rescore=False),
+    )
+    dense = models.Prefetch(
+        query=vector, using='image', limit=RANKED_DEPTH, filter=flt, params=params,
+    )
+    try:
+        return (await S['qc'].query_points(
+            COLLECTION,
+            prefetch=[
+                dense,
+                models.Prefetch(
+                    query=sparse_query(text), using='bm25', limit=RANKED_DEPTH, filter=flt,
+                ),
+            ],
+            query=models.FusionQuery(fusion=models.Fusion.RRF),
+            limit=RANKED_DEPTH, with_payload=False, timeout=20,
+        )).points
+    except Exception:
+        try:
+            # Sparse inference is allowed to fail without losing pagination.
+            return (await S['qc'].query_points(
+                COLLECTION, query=vector, using='image', limit=RANKED_DEPTH,
+                with_payload=False, query_filter=flt, params=params, timeout=20,
+            )).points
+        except Exception:
+            raise HTTPException(503, 'Search is temporarily unavailable. Please try again.')
+
+
+def pin_first_page(anchor, ranked):
+    """The full order with the page one clients already saw at its head."""
+    seen = {pid for pid, _ in anchor}
+    return (list(anchor) + [entry for entry in ranked if entry[0] not in seen])[:RANKED_DEPTH]
+
+
+async def build_ranking(rkey, text, vector, flt):
+    started = time.perf_counter()
+    if S['build_slots'] is None:
+        S['build_slots'] = asyncio.Semaphore(RANKING_BUILDS)
+    async with S['build_slots']:
+        points = await fast_ranking_query(text, vector, flt)
+    ranked = [(point.id, float(point.score)) for point in points]
+    ranking = pin_first_page(fresh(S['anchors'], rkey, RANKING_TTL) or [], ranked)
+    remember(S['rankings'], rkey, (time.monotonic(), ranking), RANKING_MAX)
+    S['ranking_failures'].pop(rkey, None)
+    print('ranking ready q=%r ids=%d ms=%.1f' %
+          (text, len(ranking), (time.perf_counter() - started) * 1000), flush=True)
+    return ranking
+
+
+def ensure_ranking(rkey, text, vector, flt):
+    """The one in-flight build for this search, started if there is none."""
+    if fresh(S['ranking_failures'], rkey, RANKING_FAILURE_TTL) is not None:
+        return None
+    task = S['building'].get(rkey)
+    if task is None:
+        task = asyncio.create_task(build_ranking(rkey, text, vector, flt))
+        S['building'][rkey] = task
+
+        def finished(done):
+            if S['building'].get(rkey) is done:
+                S['building'].pop(rkey, None)
+            if not done.cancelled() and done.exception() is not None:
+                # Nobody may be awaiting a background build. Remember failure
+                # so the app's remaining page requests cannot restart it.
+                remember(S['ranking_failures'], rkey, (time.monotonic(), True), RANKING_MAX)
+                print('ranking failed q=%r: %r' % (text, done.exception()), flush=True)
+        task.add_done_callback(finished)
+    return task
+
+
+async def ranked_page(ranking, offset, limit):
+    """One page of a ranking, with payloads read for just its own points."""
+    window = ranking[offset:offset + limit]
+    if not window:
+        return [], False
+    records = await S['qc'].retrieve(COLLECTION, ids=[pid for pid, _ in window],
+                                     with_payload=True, with_vectors=False)
+    by_id = {record.id: record for record in records}
+    # A point deleted since the ranking was built is simply left out.
+    hits = [SimpleNamespace(payload=by_id[pid].payload, score=score) for pid, score in window if pid in by_id]
+    return [result_from(hit) for hit in hits], len(ranking) > offset + limit
+
+
 @app.get('/api/search')
 async def search(request: Request, q: str = Query(..., max_length=300),
                  limit: int = Query(60, ge=1, le=100), license_class: str = '',
@@ -405,6 +579,14 @@ async def search(request: Request, q: str = Query(..., max_length=300),
     if cached and time.monotonic() - cached[0] < 120:
         S['results'].move_to_end(key)
         return {**cached[1], 'cached': True, 'ms': 0, 'timing': {'embed_ms': 0, 'ann_ms': 0}}
+    rkey = (text, licenses, include_sensitive)
+    cached_ranking = None
+    if offset > 0:
+        cached_ranking = fresh(S['rankings'], rkey, RANKING_TTL)
+        if cached_ranking is not None and offset < len(cached_ranking):
+            # Already ranked (and already past the refusal check, which is the
+            # only way a ranking gets built): no embedding, no search.
+            return await serve_ranked(key, cached_ranking, offset, limit, start, 0.0)
     # One embedding at a time on a small CPU. Waiting clients that have
     # disconnected do not consume another expensive inference slot.
     async with S['lock']:
@@ -428,54 +610,62 @@ async def search(request: Request, q: str = Query(..., max_length=300),
         remember(S['results'], key, (time.monotonic(), data), 128)
         return data
     flt = search_filter(licenses, include_sensitive)
+    embed_ms = round((embedded - start) * 1000, 1)
+    # Start the cheap deep order alongside page one, not after it. On the live
+    # disk-bound index this makes the ranking ready around the same time the
+    # first page appears. Page one still uses the accurate rescored query below.
+    early_build = None
+    if offset == 0 and fresh(S['rankings'], rkey, RANKING_TTL) is None:
+        early_build = ensure_ranking(rkey, text, vector, flt)
+    if offset > 0 and cached_ranking is None:
+        try:
+            build = ensure_ranking(rkey, text, vector, flt)
+            if build is not None:
+                ranking = await asyncio.wait_for(asyncio.shield(build), RANKING_WAIT)
+                if offset < len(ranking):
+                    return await serve_ranked(key, ranking, offset, limit, start, embed_ms)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass  # Too slow or failed: the single-page query below still answers.
     # Fetch one extra result so the client can disable Next on the last page.
     # Qdrant's limit tops out at 100; callers asking for 100 still get the
     # legacy exact-limit behavior and simply report no continuation.
     fetch_limit = min(limit + 1, 100)
-    candidates = max(100, (offset + fetch_limit) * 2)
-    dense_prefetch = models.Prefetch(
-        query=vector, using='image', limit=candidates, filter=flt,
-        params=models.SearchParams(
-            hnsw_ef=128,
-            quantization=models.QuantizationSearchParams(rescore=True, oversampling=2.0),
-        ),
-    )
-    try:
-        # The BM25 query vector is built by Qdrant Cloud inference. If that is
-        # rate-limited or unavailable, fall back to dense-only rather than
-        # failing the whole request: the semantic half needs no inference and
-        # is the primary ranking signal. Losing exact-name matching degrades
-        # results; returning 503 loses search entirely.
-        hits = (await S['qc'].query_points(
-            COLLECTION,
-            prefetch=[
-                dense_prefetch,
-                models.Prefetch(
-                    query=sparse_query(text),
-                    using='bm25', limit=candidates, filter=flt,
-                ),
-            ],
-            query=models.FusionQuery(fusion=models.Fusion.RRF),
-            limit=fetch_limit, offset=offset, with_payload=True,
-        )).points
-    except Exception:
-        try:
-            hits = (await S['qc'].query_points(
-                COLLECTION, query=vector, using='image', limit=fetch_limit,
-                offset=offset,
-                with_payload=True, query_filter=flt,
-                params=models.SearchParams(
-                    hnsw_ef=128,
-                    quantization=models.QuantizationSearchParams(rescore=True, oversampling=2.0),
-                ),
-            )).points
-        except Exception:
-            raise HTTPException(503, 'Search is temporarily unavailable. Please try again.')
+    hits = await fused_query(text, vector, flt, offset, fetch_limit)
     end = time.perf_counter()
     has_more = len(hits) > limit
     data = {'results': [result_from(hit) for hit in hits[:limit]], 'has_more': has_more,
             'ms': round((end-start)*1000, 1),
-            'timing': {'embed_ms': round((embedded-start)*1000, 1), 'ann_ms': round((end-embedded)*1000, 1)}}
+            'timing': {'embed_ms': embed_ms, 'ann_ms': round((end-embedded)*1000, 1)}}
+    remember(S['results'], key, (time.monotonic(), data), 128)
+    if offset == 0 and has_more:
+        # Pin what this client now sees, then rank the rest behind the reply.
+        anchor = [(hit.id, float(hit.score)) for hit in hits[:limit]]
+        remember(S['anchors'], rkey, (time.monotonic(), anchor), RANKING_MAX)
+        # Usually the concurrent build is still running and will read this
+        # anchor itself. If it won the race, repair its head before any later
+        # page can observe it.
+        ranking = fresh(S['rankings'], rkey, RANKING_TTL)
+        if ranking is not None:
+            remember(S['rankings'], rkey,
+                     (time.monotonic(), pin_first_page(anchor, ranking)), RANKING_MAX)
+        if fresh(S['rankings'], rkey, RANKING_TTL) is None:
+            ensure_ranking(rkey, text, vector, flt)
+    elif offset == 0:
+        # A genuinely short result set does not need a deep ranking.
+        if early_build is not None and not early_build.done():
+            early_build.cancel()
+        S['rankings'].pop(rkey, None)
+    return data
+
+
+async def serve_ranked(key, ranking, offset, limit, start, embed_ms):
+    fetched = time.perf_counter()
+    results, has_more = await ranked_page(ranking, offset, limit)
+    end = time.perf_counter()
+    data = {'results': results, 'has_more': has_more, 'ms': round((end - start) * 1000, 1),
+            'timing': {'embed_ms': embed_ms, 'ann_ms': round((end - fetched) * 1000, 1)}}
     remember(S['results'], key, (time.monotonic(), data), 128)
     return data
 

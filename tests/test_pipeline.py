@@ -148,8 +148,9 @@ class SearchTests(unittest.IsolatedAsyncioTestCase):
             self.calls.append(kw)
             return SimpleNamespace(points=[SimpleNamespace(score=.12,payload={'image_id':'commons:1','title':'test',
                     'thumb_origin':'https://example.com/t.jpg','full_url':'https://example.com/original.jpg'})])
-        api.S.update(qc=SimpleNamespace(query_points=query_points),lock=asyncio.Lock())
-        api.S['results'].clear()
+        api.S.update(qc=SimpleNamespace(query_points=query_points),lock=asyncio.Lock(),building={},build_slots=None)
+        for cache in ('results','rankings','anchors','ranking_failures'):
+            api.S[cache].clear()
         self.client=httpx.AsyncClient(transport=httpx.ASGITransport(app=api.app),base_url='http://test')
         self.patch=patch.object(api,'embed',return_value=[1.0]+[0.0]*767)
         self.patch.start()
@@ -181,25 +182,179 @@ class SearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r.json()['results'],[])
 
     async def test_offset_returns_a_page_and_reports_continuation(self):
-        async def query_points(*args,**kw):
-            self.calls.append(kw)
-            all_points = [SimpleNamespace(score=.12, payload={
-                'image_id': f'commons:{i}', 'title': f'test-{i}',
-                'thumb_origin': 'https://example.com/t.jpg',
-                'full_url': 'https://example.com/original.jpg'}) for i in range(49)]
-            start = kw.get('offset', 0)
-            return SimpleNamespace(points=all_points[start:start + kw['limit']])
-        api.S['qc'].query_points = query_points
+        index = FakeIndex(49)
+        api.S['qc'] = index
         first=await self.client.get('/api/search',params={'q':'forest','limit':48,'offset':0})
         self.assertEqual(first.status_code,200)
         self.assertEqual(len(first.json()['results']),48)
         self.assertTrue(first.json()['has_more'])
+        await settle_rankings()
         second=await self.client.get('/api/search',params={'q':'forest','limit':48,'offset':48})
         self.assertEqual(second.status_code,200)
-        self.assertEqual(second.json()['results'][0]['id'],'commons:48')
+        self.assertEqual([r['id'] for r in second.json()['results']],['commons:48'])
         self.assertFalse(second.json()['has_more'])
-        self.assertTrue(self.calls[0]['offset'] == 0)
-        self.assertTrue(self.calls[1]['offset'] == 48)
+
+
+async def settle_rankings():
+    """Let the rankings page one starts in the background finish."""
+    await asyncio.sleep(0)
+    await asyncio.gather(*list(api.S['building'].values()), return_exceptions=True)
+
+
+class FakeIndex:
+    """A tiny Qdrant: a fixed order for page queries, optionally a different
+    one for the full-depth ranking (fusion over a bigger pool can reorder)."""
+
+    def __init__(self, n, deep_order=None, fail_deep=False):
+        self.payloads = {f'p{i}': {'image_id': f'commons:{i}', 'title': f'test-{i}',
+                                   'thumb_origin': 'https://example.com/t.jpg',
+                                   'full_url': 'https://example.com/original.jpg'} for i in range(n)}
+        self.order = [f'p{i}' for i in range(n)]
+        self.deep_order = deep_order or self.order
+        self.fail_deep = fail_deep
+        self.calls, self.retrieved = [], []
+
+    async def query_points(self, *args, **kw):
+        self.calls.append(kw)
+        deep = kw['limit'] >= api.RANKED_DEPTH
+        if deep and self.fail_deep:
+            raise RuntimeError('deep query failed')
+        order = self.deep_order if deep else self.order
+        offset = kw.get('offset', 0) or 0
+        window = order[offset:offset + kw['limit']]
+        return SimpleNamespace(points=[
+            SimpleNamespace(id=pid, score=1 - (offset + i) / 10000,
+                            payload=self.payloads[pid] if kw.get('with_payload', True) else None)
+            for i, pid in enumerate(window)])
+
+    async def retrieve(self, *args, ids, with_payload=True, with_vectors=False):
+        self.retrieved.append(list(ids))
+        # Deliberately out of order: the page must come back in ranking order.
+        return [SimpleNamespace(id=pid, payload=self.payloads[pid]) for pid in reversed(ids)]
+
+
+class RankedPagingTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        api.S.update(lock=asyncio.Lock(), build_slots=None, building={})
+        for cache in ('results', 'rankings', 'anchors', 'ranking_failures'):
+            api.S[cache].clear()
+        self.client = httpx.AsyncClient(transport=httpx.ASGITransport(app=api.app), base_url='http://test')
+        self.patch = patch.object(api, 'embed', return_value=[1.0] + [0.0] * 767)
+        self.patch.start()
+
+    async def asyncTearDown(self):
+        self.patch.stop()
+        await self.client.aclose()
+
+    async def page(self, offset, q='harbour', limit=48, **params):
+        r = await self.client.get('/api/search', params={'q': q, 'limit': limit, 'offset': offset, **params})
+        self.assertEqual(r.status_code, 200)
+        return r.json()
+
+    async def test_every_later_page_is_a_slice_of_one_ranking(self):
+        index = FakeIndex(130)
+        api.S['qc'] = index
+        first = await self.page(0)
+        await settle_rankings()
+        self.assertEqual(len(index.calls), 2)  # page one, then one full ranking
+        self.assertEqual(index.calls[1]['limit'], api.RANKED_DEPTH)
+        self.assertFalse(index.calls[1]['with_payload'])
+        dense = index.calls[1]['prefetch'][0]
+        self.assertEqual(dense.limit, api.RANKED_DEPTH)
+        self.assertFalse(dense.params.quantization.rescore)
+        second, third = await self.page(48), await self.page(96)
+        self.assertEqual(len(index.calls), 2)  # no more searches, only payload reads
+        self.assertEqual([len(ids) for ids in index.retrieved], [48, 34])
+        ids = [r['id'] for page in (first, second, third) for r in page['results']]
+        self.assertEqual(ids, [f'commons:{i}' for i in range(130)])
+        self.assertTrue(second['has_more'])
+        self.assertFalse(third['has_more'])
+        # Any page size slices the same order.
+        wide = await self.page(48, limit=96)
+        self.assertEqual([r['id'] for r in wide['results']], ids[48:130])
+        self.assertEqual(len(index.calls), 2)
+
+    async def test_page_one_stays_put_when_the_deep_ranking_reorders(self):
+        order = [f'p{i}' for i in range(120)]
+        deep = order[40:60] + order[:40] + order[60:]  # a bigger pool shuffles the head
+        index = FakeIndex(120, deep_order=deep)
+        api.S['qc'] = index
+        first = await self.page(0)
+        await settle_rankings()
+        rest = (await self.page(48))['results'] + (await self.page(96))['results']
+        seen = [r['id'] for r in first['results']] + [r['id'] for r in rest]
+        self.assertEqual(seen[:48], [f'commons:{i}' for i in range(48)])
+        self.assertEqual(len(seen), len(set(seen)))  # nothing twice...
+        self.assertEqual(set(seen), {f'commons:{i}' for i in range(120)})  # ...and nothing skipped
+
+    async def test_a_deep_page_first_builds_the_ranking_and_waits_for_it(self):
+        index = FakeIndex(100)
+        api.S['qc'] = index
+        page = await self.page(48)
+        self.assertEqual([r['id'] for r in page['results']][:2], ['commons:48', 'commons:49'])
+        self.assertEqual(len(index.calls), 1)
+        self.assertEqual(index.calls[0]['limit'], api.RANKED_DEPTH)
+
+    async def test_offsets_beyond_the_apps_eight_pages_keep_the_legacy_api(self):
+        index = FakeIndex(500)
+        api.S['qc'] = index
+        await self.page(0)
+        await settle_rankings()
+        page = await self.page(432)
+        self.assertEqual(page['results'][0]['id'], 'commons:432')
+        self.assertEqual(index.calls[-1]['offset'], 432)
+        self.assertEqual(index.calls[-1]['limit'], 49)
+
+    async def test_a_failed_ranking_falls_back_to_the_single_page_query(self):
+        index = FakeIndex(100, fail_deep=True)
+        api.S['qc'] = index
+        page = await self.page(48)
+        self.assertEqual(page['results'][0]['id'], 'commons:48')
+        self.assertEqual(index.calls[-1]['offset'], 48)
+        self.assertEqual(index.calls[-1]['limit'], 49)
+
+        # A second page may use its normal page query, but must not launch the
+        # known-bad full-depth ranking again.
+        deep_calls = sum(call['limit'] >= api.RANKED_DEPTH for call in index.calls)
+        await self.page(96)
+        self.assertEqual(sum(call['limit'] >= api.RANKED_DEPTH for call in index.calls), deep_calls)
+        self.assertIsNotNone(api.fresh(api.S['ranking_failures'], ('harbour', (), False),
+                                      api.RANKING_FAILURE_TTL))
+
+    async def test_filters_and_queries_never_share_a_ranking(self):
+        index = FakeIndex(100)
+        api.S['qc'] = index
+        await self.page(0)
+        await self.page(0, license_class='public_domain')
+        await self.page(0, q='lighthouse')
+        await settle_rankings()
+        self.assertEqual(len(api.S['rankings']), 3)
+
+    async def test_a_single_page_search_ranks_nothing(self):
+        index = FakeIndex(20)
+        api.S['qc'] = index
+        page = await self.page(0)
+        await settle_rankings()
+        self.assertFalse(page['has_more'])
+        self.assertEqual(len(index.calls), 1)
+        self.assertEqual(len(api.S['rankings']), 0)
+
+    async def test_refused_queries_never_get_a_ranking(self):
+        index = FakeIndex(100)
+        api.S['qc'] = index
+        term = sorted(api.REFUSAL_CORE)[0]
+        page = await self.page(48, q=term)
+        self.assertEqual(page['results'], [])
+        self.assertIn('refusal', page)
+        await settle_rankings()
+        self.assertEqual(index.calls, [])
+        self.assertEqual(len(api.S['rankings']), 0)
+
+    def test_pinning_keeps_page_one_and_drops_its_repeats(self):
+        anchor = [('b', .9), ('a', .8)]
+        ranked = [('a', .95), ('c', .9), ('b', .7), ('d', .6)]
+        self.assertEqual([pid for pid, _ in api.pin_first_page(anchor, ranked)], ['b', 'a', 'c', 'd'])
+
 
 class RenditionUrlTests(unittest.TestCase):
     """The 4K rendition lives on Wikimedia's standard buckets, because
@@ -267,8 +422,9 @@ class RefusalTests(unittest.IsolatedAsyncioTestCase):
             self.calls.append(kw)
             return SimpleNamespace(points=[SimpleNamespace(score=.12,payload={'image_id':'commons:1','title':'test',
                     'thumb_origin':'https://example.com/t.jpg','full_url':'https://example.com/original.jpg'})])
-        api.S.update(qc=SimpleNamespace(query_points=query_points),lock=asyncio.Lock())
-        api.S['results'].clear()
+        api.S.update(qc=SimpleNamespace(query_points=query_points),lock=asyncio.Lock(),building={},build_slots=None)
+        for cache in ('results','rankings','anchors','ranking_failures'):
+            api.S[cache].clear()
         self.client=httpx.AsyncClient(transport=httpx.ASGITransport(app=api.app),base_url='http://test')
         self.patch=patch.object(api,'embed',return_value=[1.0]+[0.0]*767)
         self.patch.start()
