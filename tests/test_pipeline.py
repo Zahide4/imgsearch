@@ -1,4 +1,5 @@
 import asyncio
+from collections import OrderedDict
 import importlib.util
 import json
 import unittest
@@ -201,20 +202,32 @@ async def settle_rankings():
     await asyncio.gather(*list(api.S['building'].values()), return_exceptions=True)
 
 
+def real_client_arguments(method):
+    """The keywords the installed Qdrant client really accepts. It asserts on
+    anything else, so a fake that takes **kw hides typos the real one rejects."""
+    import inspect
+    from qdrant_client import AsyncQdrantClient
+    return {name for name, param in inspect.signature(getattr(AsyncQdrantClient, method)).parameters.items()
+            if param.kind not in (param.VAR_KEYWORD, param.VAR_POSITIONAL) and name != 'self'}
+
+
 class FakeIndex:
     """A tiny Qdrant: a fixed order for page queries, optionally a different
     one for the full-depth ranking (fusion over a bigger pool can reorder)."""
 
-    def __init__(self, n, deep_order=None, fail_deep=False):
+    def __init__(self, n, deep_order=None, fail_deep=False, shape=None):
         self.payloads = {f'p{i}': {'image_id': f'commons:{i}', 'title': f'test-{i}',
                                    'thumb_origin': 'https://example.com/t.jpg',
-                                   'full_url': 'https://example.com/original.jpg'} for i in range(n)}
+                                   'full_url': 'https://example.com/original.jpg',
+                                   **(shape(i) if shape else {})} for i in range(n)}
         self.order = [f'p{i}' for i in range(n)]
         self.deep_order = deep_order or self.order
         self.fail_deep = fail_deep
         self.calls, self.retrieved = [], []
 
     async def query_points(self, *args, **kw):
+        unknown = set(kw) - real_client_arguments('query_points')
+        assert not unknown, f'query_points does not accept {unknown}'
         self.calls.append(kw)
         deep = kw['limit'] >= api.RANKED_DEPTH
         if deep and self.fail_deep:
@@ -228,6 +241,7 @@ class FakeIndex:
             for i, pid in enumerate(window)])
 
     async def retrieve(self, *args, ids, with_payload=True, with_vectors=False):
+        assert {'ids', 'with_payload', 'with_vectors'} <= real_client_arguments('retrieve')
         self.retrieved.append(list(ids))
         # Deliberately out of order: the page must come back in ranking order.
         return [SimpleNamespace(id=pid, payload=self.payloads[pid]) for pid in reversed(ids)]
@@ -318,7 +332,7 @@ class RankedPagingTests(unittest.IsolatedAsyncioTestCase):
         deep_calls = sum(call['limit'] >= api.RANKED_DEPTH for call in index.calls)
         await self.page(96)
         self.assertEqual(sum(call['limit'] >= api.RANKED_DEPTH for call in index.calls), deep_calls)
-        self.assertIsNotNone(api.fresh(api.S['ranking_failures'], ('harbour', (), False),
+        self.assertIsNotNone(api.fresh(api.S['ranking_failures'], ('harbour', (), False, api.FilterSpec()),
                                       api.RANKING_FAILURE_TTL))
 
     async def test_filters_and_queries_never_share_a_ranking(self):
@@ -354,6 +368,216 @@ class RankedPagingTests(unittest.IsolatedAsyncioTestCase):
         anchor = [('b', .9), ('a', .8)]
         ranked = [('a', .95), ('c', .9), ('b', .7), ('d', .6)]
         self.assertEqual([pid for pid, _ in api.pin_first_page(anchor, ranked)], ['b', 'a', 'c', 'd'])
+
+
+class FallbackQueryTests(unittest.IsolatedAsyncioTestCase):
+    """When the fused (BM25) query fails, the dense-only query must work."""
+
+    async def asyncSetUp(self):
+        api.S.update(lock=asyncio.Lock(), build_slots=None, building={})
+        for cache in ('results', 'rankings', 'anchors', 'ranking_failures'):
+            api.S[cache].clear()
+        index = FakeIndex(300)
+        real = index.query_points
+
+        async def no_fusion(*args, **kw):
+            if kw.get('prefetch'):
+                raise RuntimeError('sparse inference unavailable')
+            return await real(*args, **kw)
+        index.query_points = no_fusion
+        self.index = index
+        api.S['qc'] = index
+        self.client = httpx.AsyncClient(transport=httpx.ASGITransport(app=api.app), base_url='http://test')
+        self.patch = patch.object(api, 'embed', return_value=[1.0] + [0.0] * 767)
+        self.patch.start()
+
+    async def asyncTearDown(self):
+        self.patch.stop()
+        await self.client.aclose()
+
+    async def test_page_ranking_and_filters_all_survive_without_fusion(self):
+        first = await self.client.get('/api/search', params={'q': 'harbour', 'limit': 48})
+        self.assertEqual(first.status_code, 200)
+        await settle_rankings()
+        second = await self.client.get('/api/search', params={'q': 'harbour', 'limit': 48, 'offset': 48})
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second.json()['results'][0]['id'], 'commons:48')
+        filtered = await self.client.get('/api/search', params={'q': 'harbour', 'limit': 48, 'source': 'commons'})
+        self.assertEqual(filtered.status_code, 200)
+        self.assertEqual(filtered.json()['total'], 300)
+        self.assertEqual(api.S['ranking_failures'], OrderedDict())
+
+
+class FilterMatchingTests(unittest.TestCase):
+    """Advanced filters read only fields every point already has."""
+
+    def test_source_comes_from_the_id_prefix(self):
+        self.assertEqual(api.source_of('commons:12'), 'commons')
+        self.assertEqual(api.source_of('ov:abc'), 'openverse')
+        self.assertEqual(api.source_of('OpenVerse:abc'), 'openverse')
+        self.assertEqual(api.source_of('nasa:PIA1'), 'nasa')
+        self.assertEqual(api.source_of('flickr:1'), '')
+        self.assertEqual(api.source_of(None), '')
+
+    def test_orientation_has_a_square_band_and_unknown_sizes_have_none(self):
+        self.assertEqual(api.orientation_of(1100, 1000), 'square')
+        self.assertEqual(api.orientation_of(1000, 1100), 'square')
+        self.assertEqual(api.orientation_of(1101, 1000), 'landscape')
+        self.assertEqual(api.orientation_of(1000, 1101), 'portrait')
+        self.assertEqual(api.orientation_of(0, 0), '')
+        self.assertEqual(api.dimensions({'width': 'x', 'height': 5}), (0, 0))
+        self.assertEqual(api.dimensions({'width': 400, 'height': 0}), (0, 0))
+
+    def test_file_type_prefers_the_recorded_mime_then_the_extension(self):
+        self.assertEqual(api.file_type_of('image/png', 'https://x/a.jpg'), 'png')
+        self.assertEqual(api.file_type_of('IMAGE/JPEG; q=1', ''), 'jpeg')
+        self.assertEqual(api.file_type_of('', 'https://x/photo.WEBP?width=10'), 'webp')
+        self.assertEqual(api.file_type_of('', 'https://iiif.example/image/V1/full/full/0/default.jpg'), 'jpeg')
+        self.assertEqual(api.file_type_of('', 'https://x/scan.tif'), '')
+        self.assertEqual(api.file_type_of(None, None), '')
+
+    def test_matching_is_inclusive_by_threshold_and_strict_about_unknowns(self):
+        uhd = {'image_id': 'commons:1', 'width': 3840, 'height': 2160, 'mime': 'image/jpeg'}
+        self.assertTrue(api.matches(uhd, api.FilterSpec(min_resolution='4k')))
+        self.assertTrue(api.matches(uhd, api.FilterSpec(('landscape',), '2mp', ('commons',), ('jpeg',))))
+        self.assertFalse(api.matches(uhd, api.FilterSpec(min_resolution='8k')))
+        self.assertFalse(api.matches(uhd, api.FilterSpec(orientations=('portrait', 'square'))))
+        self.assertFalse(api.matches(uhd, api.FilterSpec(sources=('nasa',))))
+        met = {'image_id': 'met:5', 'width': 0, 'height': 0, 'full_url': 'https://x/a.jpg'}
+        self.assertTrue(api.matches(met, api.FilterSpec(sources=('met',), file_types=('jpeg',))))
+        self.assertFalse(api.matches(met, api.FilterSpec(orientations=('landscape',))))
+        self.assertFalse(api.matches(met, api.FilterSpec(min_resolution='2mp')))
+        self.assertTrue(api.matches(met, api.FilterSpec()))
+        self.assertTrue(api.matches(None, api.FilterSpec()))
+        self.assertFalse(api.FilterSpec().active)
+
+
+def shaped_id(i):
+    return f'nasa:{i}' if i % 5 == 0 else f'commons:{i}'
+
+
+def shaped(i):
+    """A mixed corpus: every third image portrait, every fifth from NASA,
+    every seventh with no recorded size, and the rest landscape 4K JPEGs."""
+    shape = {'width': 3840, 'height': 2160, 'mime': 'image/jpeg'}
+    if i % 3 == 0:
+        shape.update(width=2000, height=3000)
+    if i % 5 == 0:
+        shape.update(image_id=f'nasa:{i}', mime='', full_url='https://images.nasa.gov/a~orig.png')
+    if i % 7 == 0:
+        shape.update(width=0, height=0)
+    return shape
+
+
+class FilteredSearchTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        api.S.update(lock=asyncio.Lock(), build_slots=None, building={})
+        for cache in ('results', 'rankings', 'anchors', 'ranking_failures'):
+            api.S[cache].clear()
+        self.client = httpx.AsyncClient(transport=httpx.ASGITransport(app=api.app), base_url='http://test')
+        self.patch = patch.object(api, 'embed', return_value=[1.0] + [0.0] * 767)
+        self.patch.start()
+
+    async def asyncTearDown(self):
+        self.patch.stop()
+        await self.client.aclose()
+
+    async def get(self, **params):
+        return await self.client.get('/api/search', params={'q': 'harbour', 'limit': 48, **params})
+
+    async def test_every_page_holds_only_matches_in_ranking_order(self):
+        index = FakeIndex(700, shape=shaped)
+        api.S['qc'] = index
+        # Landscape 4K: not portrait, has a size. Source does not matter.
+        expected = [shaped_id(i) for i in range(700) if i % 3 and i % 7][:api.RANKED_DEPTH]
+        seen = []
+        for offset in (0, 48, 96):
+            r = await self.get(orientation='landscape', min_resolution='4k', offset=offset)
+            self.assertEqual(r.status_code, 200)
+            body = r.json()
+            self.assertEqual(body['total'], len(expected))
+            self.assertTrue(body['has_more'])
+            seen += [item['id'] for item in body['results']]
+        self.assertEqual(seen, expected[:144])
+        deep = [call for call in index.calls if call['limit'] == api.FILTER_DEPTH]
+        self.assertEqual(len(deep), 1)  # one candidate query serves every page
+        self.assertEqual(deep[0]['with_payload'].include, api.FILTER_FIELDS)
+
+    async def test_the_last_page_ends_exactly(self):
+        api.S['qc'] = FakeIndex(300, shape=shaped)
+        matches = [i for i in range(300) if i % 5 == 0]  # size is irrelevant to source
+        r = await self.get(source='nasa', offset=48)
+        body = r.json()
+        self.assertEqual(body['total'], len(matches))
+        self.assertEqual([item['id'] for item in body['results']], [f'nasa:{i}' for i in matches[48:96]])
+        self.assertFalse(body['has_more'])
+
+    async def test_file_format_falls_back_to_the_link_and_unknown_sizes_drop_out(self):
+        api.S['qc'] = FakeIndex(200, shape=shaped)
+        png = (await self.get(file_type='png')).json()
+        self.assertTrue(png['results'])
+        self.assertTrue(all(item['id'].startswith('nasa:') for item in png['results']))
+        square = (await self.get(orientation='square')).json()
+        self.assertEqual(square['results'], [])
+        self.assertEqual(square['total'], 0)
+        self.assertFalse(square['has_more'])
+
+    async def test_the_accurate_head_is_pinned_ahead_of_the_cheap_order(self):
+        order = [f'p{i}' for i in range(400)]
+        index = FakeIndex(400, deep_order=list(reversed(order)), shape=shaped)
+        api.S['qc'] = index
+        body = (await self.get(source='commons')).json()
+        head = [f'commons:{i}' for i in range(100) if i % 5][:48]
+        self.assertEqual([item['id'] for item in body['results']], head)
+        self.assertEqual(len({item['id'] for item in body['results']}), 48)
+
+    async def test_filters_never_share_rankings_or_cached_pages(self):
+        index = FakeIndex(400, shape=shaped)
+        api.S['qc'] = index
+        plain = (await self.get()).json()
+        await settle_rankings()
+        portrait = (await self.get(orientation='portrait')).json()
+        both = (await self.get(orientation='portrait,landscape')).json()
+        self.assertNotEqual([i['id'] for i in plain['results']], [i['id'] for i in portrait['results']])
+        self.assertNotEqual(portrait['total'], both['total'])
+        self.assertEqual(len(api.S['rankings']), 3)
+
+    async def test_plain_searches_never_run_the_filter_query(self):
+        index = FakeIndex(400, shape=shaped)
+        api.S['qc'] = index
+        r = await self.get(license_class='public_domain,attribution')
+        await settle_rankings()
+        self.assertEqual(r.status_code, 200)
+        self.assertFalse(any(call['limit'] == api.FILTER_DEPTH for call in index.calls))
+
+    async def test_a_failed_filter_build_degrades_to_a_short_honest_first_page(self):
+        index = FakeIndex(400, fail_deep=True, shape=shaped)
+        api.S['qc'] = index
+        first = (await self.get(orientation='portrait')).json()
+        ids = [item['id'] for item in first['results']]
+        self.assertTrue(ids)
+        self.assertEqual(ids, [shaped_id(i) for i in range(100) if i % 3 == 0 and i % 7][:48])
+        self.assertFalse(first['has_more'])
+        later = await self.get(orientation='portrait', offset=48)
+        self.assertEqual(later.status_code, 503)
+
+    async def test_invalid_filters_are_rejected_and_spacing_is_forgiven(self):
+        for name, value in [('orientation', 'diagonal'), ('source', 'unsplash'),
+                            ('file_type', 'gif'), ('min_resolution', 'huge'),
+                            ('license_class', 'nope')]:
+            r = await self.get(**{name: value})
+            self.assertEqual(r.status_code, 400, name)
+        api.S['qc'] = FakeIndex(50, shape=shaped)
+        r = await self.get(orientation=' landscape , landscape,', source='commons,')
+        self.assertEqual(r.status_code, 200)
+
+    async def test_refused_queries_refuse_before_any_filtering(self):
+        index = FakeIndex(50, shape=shaped)
+        api.S['qc'] = index
+        term = sorted(api.REFUSAL_CORE)[0]
+        body = (await self.get(q=term, orientation='landscape')).json()
+        self.assertIn('refusal', body)
+        self.assertEqual(index.calls, [])
 
 
 class RenditionUrlTests(unittest.TestCase):

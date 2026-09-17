@@ -6,8 +6,10 @@ import re
 import string
 import time
 from collections import OrderedDict
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
-from pathlib import Path
+from typing import NamedTuple
+from urllib.parse import urlsplit
 
 import numpy as np
 import onnxruntime as ort
@@ -41,8 +43,18 @@ S = {'sess': None, 'tok': None, 'qc': None, 'cache': OrderedDict(),
 # payload lookup for just its own points. Page one's points are pinned to the
 # head of the order, so the first page a client saw is never contradicted.
 RANKED_DEPTH = 384
-RANKING_TTL = 600
-RANKING_MAX = 48
+# Search results change only when the index does, and a repeated search is by
+# far the cheapest one to serve: an uncached search costs ~90k disk reads.
+RESULT_TTL = 1800
+# Page-one search effort. Measured on the live index with 24 real queries
+# against a high-effort reference (ef 256, 3x rescoring): ef 128 / 2x kept
+# 99.4% of the top 48 at a median 2.05 s; ef 96 / 1.5x keeps 99.1% at 1.34 s,
+# because every visited graph node is a disk read on this 8 GB box.
+PAGE_EF = 96
+PAGE_OVERSAMPLING = 1.5
+RESULT_MAX = 512
+RANKING_TTL = 1800
+RANKING_MAX = 96
 # A failed deep build must not be restarted by every page request. The normal
 # page query remains available during this cooldown.
 RANKING_FAILURE_TTL = 600
@@ -54,6 +66,99 @@ RANKING_BUILDS = 2
 RANKING_WAIT = 25
 _PUNCT = str.maketrans('', '', string.punctuation)
 ALLOWED_LICENSES = {'public_domain', 'attribution', 'share_alike'}
+
+# Advanced filters: orientation, minimum resolution, source and file format.
+# They read only what every point already carries -- image_id, width, height,
+# mime and full_url -- so they need no migration and no new payload index.
+# Licence and safety stay Qdrant conditions (both indexed). The advanced ones
+# are applied to a deep, cheap candidate order whose payload is limited to
+# those five fields, then the matches become the search's ranking. A point
+# whose value is unknown (The Met and Wellcome record no pixel size) never
+# matches a filter on that value; with no filter, nothing is ever excluded.
+ALLOWED_ORIENTATIONS = {'landscape', 'portrait', 'square'}
+ALLOWED_SOURCES = {'commons', 'openverse', 'nasa', 'met', 'wellcome'}
+ALLOWED_FILE_TYPES = {'jpeg', 'png', 'webp'}
+# Minimum pixel counts, not edge lengths, so orientation never matters:
+# 4K UHD is 3840x2160 (8.3 MP) and 8K is 7680x4320 (33 MP).
+MIN_PIXELS = {'': 0, '2mp': 2_000_000, '4k': 8_000_000, '8k': 30_000_000}
+# Within 10% of 1:1 reads as square.
+SQUARE_TOLERANCE = 1.1
+# Candidates screened for a filtered search. Deep enough that ordinary filters
+# fill all eight pages; a very narrow combination honestly returns fewer.
+FILTER_DEPTH = 1200
+FILTER_FIELDS = ['image_id', 'width', 'height', 'mime', 'full_url']
+_SOURCE_PREFIXES = {'commons': 'commons', 'ov': 'openverse', 'openverse': 'openverse',
+                    'nasa': 'nasa', 'met': 'met', 'wellcome': 'wellcome'}
+_MIME_TYPES = {'image/jpeg': 'jpeg', 'image/jpg': 'jpeg', 'image/png': 'png', 'image/webp': 'webp'}
+_EXTENSIONS = {'.jpg': 'jpeg', '.jpeg': 'jpeg', '.png': 'png', '.webp': 'webp'}
+
+
+class FilterSpec(NamedTuple):
+    orientations: tuple = ()
+    min_resolution: str = ''
+    sources: tuple = ()
+    file_types: tuple = ()
+
+    @property
+    def active(self):
+        return bool(self.orientations or self.min_resolution or self.sources or self.file_types)
+
+
+def source_of(image_id):
+    return _SOURCE_PREFIXES.get(str(image_id or '').split(':', 1)[0].lower(), '')
+
+
+def dimensions(payload):
+    try:
+        width, height = int(payload.get('width') or 0), int(payload.get('height') or 0)
+    except (TypeError, ValueError):
+        return 0, 0
+    return (width, height) if width > 0 and height > 0 else (0, 0)
+
+
+def orientation_of(width, height):
+    if width <= 0 or height <= 0:
+        return ''
+    ratio = width / height
+    if ratio > SQUARE_TOLERANCE:
+        return 'landscape'
+    if ratio < 1 / SQUARE_TOLERANCE:
+        return 'portrait'
+    return 'square'
+
+
+def file_type_of(mime, url):
+    """The recorded MIME type when there is one, else the file's extension."""
+    kind = _MIME_TYPES.get(str(mime or '').lower().split(';', 1)[0].strip())
+    if kind:
+        return kind
+    try:
+        suffix = PurePosixPath(urlsplit(str(url or '')).path).suffix.lower()
+    except ValueError:
+        return ''
+    return _EXTENSIONS.get(suffix, '')
+
+
+def matches(payload, spec):
+    payload = payload or {}
+    if spec.sources and source_of(payload.get('image_id')) not in spec.sources:
+        return False
+    if spec.orientations or spec.min_resolution:
+        width, height = dimensions(payload)
+        if spec.orientations and orientation_of(width, height) not in spec.orientations:
+            return False
+        if spec.min_resolution and width * height < MIN_PIXELS[spec.min_resolution]:
+            return False
+    if spec.file_types and file_type_of(payload.get('mime'), payload.get('full_url')) not in spec.file_types:
+        return False
+    return True
+
+
+def choices(raw, allowed, label):
+    values = tuple(sorted({value.strip() for value in raw.split(',') if value.strip()}))
+    if set(values) - allowed:
+        raise HTTPException(400, 'Unknown %s filter' % label)
+    return values
 
 # Adult-query refusal. The image safety filter is query-blind: it trims
 # globally-high-scoring images, so a hostile query retrieves the most similar
@@ -424,8 +529,8 @@ async def fused_query(text, vector, flt, offset, limit, with_payload=True):
     dense_prefetch = models.Prefetch(
         query=vector, using='image', limit=candidates, filter=flt,
         params=models.SearchParams(
-            hnsw_ef=128,
-            quantization=models.QuantizationSearchParams(rescore=True, oversampling=2.0),
+            hnsw_ef=PAGE_EF,
+            quantization=models.QuantizationSearchParams(rescore=True, oversampling=PAGE_OVERSAMPLING),
         ),
     )
     try:
@@ -452,16 +557,18 @@ async def fused_query(text, vector, flt, offset, limit, with_payload=True):
                 COLLECTION, query=vector, using='image', limit=limit,
                 offset=offset,
                 with_payload=with_payload, query_filter=flt,
-                params=models.SearchParams(
-                    hnsw_ef=128,
-                    quantization=models.QuantizationSearchParams(rescore=True, oversampling=2.0),
+                # `search_params`, not `params`: the client rejects unknown
+                # keywords, which turned every dense-only fallback into a 503.
+                search_params=models.SearchParams(
+                    hnsw_ef=PAGE_EF,
+                    quantization=models.QuantizationSearchParams(rescore=True, oversampling=PAGE_OVERSAMPLING),
                 ),
             )).points
         except Exception:
             raise HTTPException(503, 'Search is temporarily unavailable. Please try again.')
 
 
-async def fast_ranking_query(text, vector, flt):
+async def fast_ranking_query(text, vector, flt, depth=RANKED_DEPTH, with_payload=False):
     """One inexpensive approximate order for pages after the first.
 
     Page one keeps full-precision rescoring. Ranking 1,100 later results with
@@ -476,7 +583,7 @@ async def fast_ranking_query(text, vector, flt):
         quantization=models.QuantizationSearchParams(rescore=False),
     )
     dense = models.Prefetch(
-        query=vector, using='image', limit=RANKED_DEPTH, filter=flt, params=params,
+        query=vector, using='image', limit=depth, filter=flt, params=params,
     )
     try:
         return (await S['qc'].query_points(
@@ -484,18 +591,18 @@ async def fast_ranking_query(text, vector, flt):
             prefetch=[
                 dense,
                 models.Prefetch(
-                    query=sparse_query(text), using='bm25', limit=RANKED_DEPTH, filter=flt,
+                    query=sparse_query(text), using='bm25', limit=depth, filter=flt,
                 ),
             ],
             query=models.FusionQuery(fusion=models.Fusion.RRF),
-            limit=RANKED_DEPTH, with_payload=False, timeout=20,
+            limit=depth, with_payload=with_payload, timeout=20,
         )).points
     except Exception:
         try:
             # Sparse inference is allowed to fail without losing pagination.
             return (await S['qc'].query_points(
-                COLLECTION, query=vector, using='image', limit=RANKED_DEPTH,
-                with_payload=False, query_filter=flt, params=params, timeout=20,
+                COLLECTION, query=vector, using='image', limit=depth,
+                with_payload=with_payload, query_filter=flt, search_params=params, timeout=20,
             )).points
         except Exception:
             raise HTTPException(503, 'Search is temporarily unavailable. Please try again.')
@@ -522,13 +629,45 @@ async def build_ranking(rkey, text, vector, flt):
     return ranking
 
 
-def ensure_ranking(rkey, text, vector, flt):
+async def build_filtered_ranking(rkey, text, vector, flt, spec):
+    """Every match for an advanced filter, best first, as one ranking.
+
+    The deep candidate order is the cheap unrescored one; alongside it the
+    accurate rescored top 100 runs, and its matches are pinned to the head, so
+    the first page of a filtered search is ranked as well as an unfiltered one.
+    Only the five fields the filters read come back with the candidates.
+    """
+    started = time.perf_counter()
+    selector = models.PayloadSelectorInclude(include=FILTER_FIELDS)
+    if S['build_slots'] is None:
+        S['build_slots'] = asyncio.Semaphore(RANKING_BUILDS)
+    async with S['build_slots']:
+        accurate, deep = await asyncio.gather(
+            fused_query(text, vector, flt, 0, 100, with_payload=selector),
+            fast_ranking_query(text, vector, flt, depth=FILTER_DEPTH, with_payload=selector),
+            return_exceptions=True)
+    if isinstance(deep, BaseException):
+        raise deep
+    head = [] if isinstance(accurate, BaseException) else accurate
+    anchor = [(point.id, float(point.score)) for point in head if matches(point.payload, spec)]
+    ranked = [(point.id, float(point.score)) for point in deep if matches(point.payload, spec)]
+    ranking = pin_first_page(anchor, ranked)
+    remember(S['rankings'], rkey, (time.monotonic(), ranking), RANKING_MAX)
+    S['ranking_failures'].pop(rkey, None)
+    print('filtered ranking ready q=%r spec=%r matched=%d of %d ms=%.1f' %
+          (text, tuple(spec), len(ranking), len(deep), (time.perf_counter() - started) * 1000), flush=True)
+    return ranking
+
+
+def ensure_ranking(rkey, text, vector, flt, spec=FilterSpec()):
     """The one in-flight build for this search, started if there is none."""
     if fresh(S['ranking_failures'], rkey, RANKING_FAILURE_TTL) is not None:
         return None
     task = S['building'].get(rkey)
     if task is None:
-        task = asyncio.create_task(build_ranking(rkey, text, vector, flt))
+        build = (build_filtered_ranking(rkey, text, vector, flt, spec) if spec.active
+                 else build_ranking(rkey, text, vector, flt))
+        task = asyncio.create_task(build)
         S['building'][rkey] = task
 
         def finished(done):
@@ -560,6 +699,8 @@ async def ranked_page(ranking, offset, limit):
 async def search(request: Request, q: str = Query(..., max_length=300),
                  limit: int = Query(60, ge=1, le=100), license_class: str = '',
                  offset: int = Query(0, ge=0, le=1000),
+                 orientation: str = '', min_resolution: str = '',
+                 source: str = '', file_type: str = '',
                  include_sensitive: bool = Query(
                      False, description='Return images the safety filter would '
                                         'exclude. Medical, anatomical and fine-art '
@@ -567,19 +708,22 @@ async def search(request: Request, q: str = Query(..., max_length=300),
                                         'cannot tell them apart perfectly.')):
     start = time.perf_counter()
     text = canon(q)
-    licenses = tuple(sorted(set(filter(None, license_class.split(',')))))
-    if set(licenses) - ALLOWED_LICENSES:
-        raise HTTPException(400, 'Unknown license filter')
+    licenses = choices(license_class, ALLOWED_LICENSES, 'license')
+    if min_resolution not in MIN_PIXELS:
+        raise HTTPException(400, 'Unknown resolution filter')
+    spec = FilterSpec(choices(orientation, ALLOWED_ORIENTATIONS, 'orientation'), min_resolution,
+                      choices(source, ALLOWED_SOURCES, 'source'),
+                      choices(file_type, ALLOWED_FILE_TYPES, 'file type'))
     if not text:
         return {'results': [], 'ms': 0, 'has_more': False}
     if S['qc'] is None:
         raise HTTPException(503, 'Search is not configured')
-    key = (text, limit, offset, licenses, include_sensitive)
+    key = (text, limit, offset, licenses, include_sensitive, spec)
     cached = S['results'].get(key)
-    if cached and time.monotonic() - cached[0] < 120:
+    if cached and time.monotonic() - cached[0] < RESULT_TTL:
         S['results'].move_to_end(key)
         return {**cached[1], 'cached': True, 'ms': 0, 'timing': {'embed_ms': 0, 'ann_ms': 0}}
-    rkey = (text, licenses, include_sensitive)
+    rkey = (text, licenses, include_sensitive, spec)
     cached_ranking = None
     if offset > 0:
         cached_ranking = fresh(S['rankings'], rkey, RANKING_TTL)
@@ -607,10 +751,12 @@ async def search(request: Request, q: str = Query(..., max_length=300),
         data = {'results': [], 'ms': round((embedded - start) * 1000, 1),
                 'timing': {'embed_ms': round((embedded - start) * 1000, 1), 'ann_ms': 0},
                 'refusal': REFUSAL_MESSAGE, 'has_more': False}
-        remember(S['results'], key, (time.monotonic(), data), 128)
+        remember(S['results'], key, (time.monotonic(), data), RESULT_MAX)
         return data
     flt = search_filter(licenses, include_sensitive)
     embed_ms = round((embedded - start) * 1000, 1)
+    if spec.active:
+        return await filtered_search(key, rkey, text, vector, flt, spec, offset, limit, start, embed_ms)
     # Start the cheap deep order alongside page one, not after it. On the live
     # disk-bound index this makes the ranking ready around the same time the
     # first page appears. Page one still uses the accurate rescored query below.
@@ -638,7 +784,7 @@ async def search(request: Request, q: str = Query(..., max_length=300),
     data = {'results': [result_from(hit) for hit in hits[:limit]], 'has_more': has_more,
             'ms': round((end-start)*1000, 1),
             'timing': {'embed_ms': embed_ms, 'ann_ms': round((end-embedded)*1000, 1)}}
-    remember(S['results'], key, (time.monotonic(), data), 128)
+    remember(S['results'], key, (time.monotonic(), data), RESULT_MAX)
     if offset == 0 and has_more:
         # Pin what this client now sees, then rank the rest behind the reply.
         anchor = [(hit.id, float(hit.score)) for hit in hits[:limit]]
@@ -660,13 +806,49 @@ async def search(request: Request, q: str = Query(..., max_length=300),
     return data
 
 
+async def filtered_search(key, rkey, text, vector, flt, spec, offset, limit, start, embed_ms):
+    """Any page of a filtered search: always a slice of its one ranking.
+
+    A cached ranking was served before embedding; this waits for the build.
+    If the build fails or runs past RANKING_WAIT, page one still answers from
+    the accurate top 100 (fewer results, no continuation) and later pages ask
+    the client to retry, rather than showing images that break the filter.
+    """
+    ranking = fresh(S['rankings'], rkey, RANKING_TTL)
+    if ranking is not None:
+        return await serve_ranked(key, ranking, offset, limit, start, embed_ms)
+    build = ensure_ranking(rkey, text, vector, flt, spec)
+    if build is not None:
+        try:
+            ranking = await asyncio.wait_for(asyncio.shield(build), RANKING_WAIT)
+            return await serve_ranked(key, ranking, offset, limit, start, embed_ms)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+    if offset > 0:
+        raise HTTPException(503, 'Search is temporarily unavailable. Please try again.')
+    hits = await fused_query(text, vector, flt, 0, 100)
+    kept = [hit for hit in hits if matches(hit.payload, spec)][:limit]
+    end = time.perf_counter()
+    data = {'results': [result_from(hit) for hit in kept], 'has_more': False,
+            'ms': round((end - start) * 1000, 1),
+            'timing': {'embed_ms': embed_ms, 'ann_ms': round((end - start) * 1000 - embed_ms, 1)}}
+    # Short-lived on purpose: the next attempt should get the full ranking.
+    # Stamped as nearly expired, so it lives ~20 s and the next try ranks fully.
+    remember(S['results'], key, (time.monotonic() - (RESULT_TTL - 20), data), RESULT_MAX)
+    return data
+
+
 async def serve_ranked(key, ranking, offset, limit, start, embed_ms):
     fetched = time.perf_counter()
     results, has_more = await ranked_page(ranking, offset, limit)
     end = time.perf_counter()
-    data = {'results': results, 'has_more': has_more, 'ms': round((end - start) * 1000, 1),
+    # `total` is exact for this search: every result it can page to.
+    data = {'results': results, 'has_more': has_more, 'total': len(ranking),
+            'ms': round((end - start) * 1000, 1),
             'timing': {'embed_ms': embed_ms, 'ann_ms': round((end - fetched) * 1000, 1)}}
-    remember(S['results'], key, (time.monotonic(), data), 128)
+    remember(S['results'], key, (time.monotonic(), data), RESULT_MAX)
     return data
 
 

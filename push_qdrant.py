@@ -139,6 +139,7 @@ def push(batch_size=256):
                     "license_class": license_class(r["license"]),
                     "license_url": r["license_url"] or "",
                     "source_url": r["source_url"] or "",
+                    "full_url": r["full_url"] or "",
                     "width": r["width"] or 0,
                     "height": r["height"] or 0,
                     "tags": r["tags"] or "",
